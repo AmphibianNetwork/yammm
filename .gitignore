@@ -1,0 +1,50 @@
+# Rust / Cargo
+target
+**/*.rs.bk
+
+# Nix
+result
+result-lib/
+.nix-result/
+*.drv
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.cache/
+
+# System files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Environment
+.direnv/
+.env
+.env.local
+
+# Logs and temp
+*.log
+tmp/
+temp/
+
+# E2E test work directory
+target/e2e-work/
+
+# Pre-commit config
+.pre-commit-config.yaml
+
+# Runtime artifacts (modpack workspace files that shouldn't be in the repo root)
+/modpack.toml
+/config/
+/mods/
+/resourcepacks/
+/resource_packs/
+/shader_packs/
+/resources/
+
+# Misc
+wip

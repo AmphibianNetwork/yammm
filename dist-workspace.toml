@@ -1,0 +1,26 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.31.0"
+ci = "github"
+installers = ["shell", "powershell", "homebrew", "msi"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+
+merge-tasks = true
+install-success-msg = "yammm is installed! Run 'yammm --help' to get started."
+install-path = "CARGO_HOME"
+
+create-release = true
+allow-dirty = ["ci"]
+
+[dist.dependencies.apt]
+libx11-dev = { stage = ["build", "run"] }
+libwayland-dev = { stage = ["build", "run"] }
+libxkbcommon-dev = { stage = ["build", "run"] }
+
+[dist.homebrew]
+tap = "Conquerix/homebrew-tap"
+
+[dist.msi]
+upgrade-code = "E9C1B8D0-3A7F-4D2E-B5C6-8F0A1E2D3B4C"

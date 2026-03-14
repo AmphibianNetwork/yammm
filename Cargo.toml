@@ -1,0 +1,105 @@
+[workspace]
+members = ["e2e"]
+package.version = "0.1.0"
+
+[package]
+authors = ["Conquerix <conquerix@shulker.link>"]
+edition = "2021"
+# If you change the name here, you must also do it in flake.nix (and run `cargo generate-lockfile` afterwards)
+name = "yammm"
+description = "Yet Another Minecraft Modpack Maker"
+version.workspace = true
+rust-version = "1.80"
+repository = "https://github.com/Conquerix/yammm"
+homepage = "https://github.com/Conquerix/yammm"
+keywords = ["minecraft", "modpack", "cli", "modrinth", "curseforge"]
+categories = ["command-line-utilities", "games"]
+license = "MIT"
+
+[package.metadata.wix]
+upgrade-guid = "A6A8F3AA-2004-497F-B747-097F8CDC20C4"
+path-guid = "5647212E-7AB6-4EE3-BD49-1B14FF9C71D9"
+license = false
+eula = false
+
+[package.metadata.deb]
+maintainer = "Conquerix <conquerix@shulker.link>"
+copyright = "2026, Conquerix <conquerix@shulker.link>"
+license-file = ["LICENSE", "4"]
+depends = "libx11-6, libwayland-client0, libxkbcommon0"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/dist/yammm", "usr/bin/", "755"],
+    ["LICENSE", "usr/share/doc/yammm/", "644"],
+    ["CHANGELOG.md", "usr/share/doc/yammm/", "644"],
+]
+
+[package.metadata.generate-rpm]
+license = "MIT"
+summary = "Yet Another Minecraft Modpack Maker"
+section = "utils"
+priority = "optional"
+requires = { libX11 = "*", libwayland-client = "*", libxkbcommon = "*" }
+assets = [
+    { source = "target/dist/yammm", dest = "/usr/bin/yammm", mode = "755" },
+    { source = "LICENSE", dest = "/usr/share/doc/yammm/LICENSE", mode = "644" },
+    { source = "CHANGELOG.md", dest = "/usr/share/doc/yammm/CHANGELOG.md", mode = "644" },
+]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = ["syntax-highlight"]
+syntax-highlight = ["syntect"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+dirs = "6"
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
+digest = "0.10"
+hex = "0.4"
+zip = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+ron = "0.8"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+human-panic = "2"
+dialoguer = "0.11"
+clap_complete = "4"
+pathdiff = "0.2"
+console = "0.15"
+indicatif = "0.17"
+comfy-table = "7"
+ratatui = "0.29"
+crossterm = "0.28"
+nucleo-matcher = "0.3"
+syntect = { version = "5", default-features = false, features = ["default-fancy"], optional = true }
+path-clean = "1"
+base64 = "0.22"
+flate2 = "1.1.9"
+tar = "0.4.45"
+ctrlc = "3"
+time = { version = "0.3", features = ["local-offset"] }
+tui-textarea = "0.7"
+arboard = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+mockito = "1.7.2"
+tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
