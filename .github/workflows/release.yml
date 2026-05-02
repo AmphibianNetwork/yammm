@@ -308,7 +308,8 @@ jobs:
         run: cargo deb --profile dist --output target/distrib/
       - name: Build .rpm package
         run: |
-          cargo generate-rpm --profile dist --target target/distrib/
+          mkdir -p target/distrib
+          cargo generate-rpm --profile dist --output target/distrib/
       - name: Upload Linux packages
         uses: actions/upload-artifact@v6
         with:
