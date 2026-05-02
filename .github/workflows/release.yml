@@ -304,10 +304,6 @@ jobs:
         run: cargo install cargo-generate-rpm
       - name: Build release binary
         run: cargo build --profile dist
-      - name: Copy binary for packaging
-        run: |
-          mkdir -p target/dist
-          cp target/dist/yammm target/dist/yammm
       - name: Build .deb package
         run: cargo deb --profile dist --output target/distrib/
       - name: Build .rpm package
