@@ -162,6 +162,8 @@ pub struct TrackedMod {
 	pub categories: Vec<String>,
 	#[serde(default)]
 	pub filename: Option<String>,
+	#[serde(default)]
+	pub unresolved: bool,
 }
 
 impl TrackedMod {
@@ -184,6 +186,7 @@ impl TrackedMod {
 			env: ModEnv::default(),
 			categories: Vec::new(),
 			filename: None,
+			unresolved: false,
 		}
 	}
 
@@ -210,6 +213,7 @@ impl TrackedMod {
 			env,
 			categories: Vec::new(),
 			filename: None,
+			unresolved: false,
 		}
 	}
 }
@@ -440,6 +444,7 @@ pub struct TrackedModBuilder {
 	env: ModEnv,
 	categories: Vec<String>,
 	filename: Option<String>,
+	unresolved: bool,
 }
 
 impl TrackedModBuilder {
@@ -539,6 +544,14 @@ impl TrackedModBuilder {
 		self
 	}
 
+	pub fn unresolved(
+		mut self,
+		unresolved: bool,
+	) -> Self {
+		self.unresolved = unresolved;
+		self
+	}
+
 	pub fn build(self) -> TrackedMod {
 		TrackedMod {
 			id: self.id,
@@ -556,6 +569,7 @@ impl TrackedModBuilder {
 			env: self.env,
 			categories: self.categories,
 			filename: self.filename,
+			unresolved: self.unresolved,
 		}
 	}
 }

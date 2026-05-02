@@ -2,11 +2,17 @@ use crate::api::ModrinthClient;
 use crate::app::AppContext;
 use crate::commands::export::mrpack::{mrpack_env_to_mod_env, MrpackIndex};
 use crate::output;
+use crate::services::deps_install::{
+	categorize_deps, present_incompatible_warnings, prompt_and_install_deps,
+	record_dep_edges, DepInstallContext,
+};
+use crate::services::resolver::DependencyResolver;
 use crate::types::{HashType, ModEnv, ModSource, ProjectType, TrackedMod};
 use crate::utils::slugify;
 use anyhow::{Context, Result};
 use clap::Parser;
 use path_clean::PathClean;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -126,6 +132,9 @@ impl ImportCommand {
 
 		let mut added = 0usize;
 		let mut skipped = 0usize;
+		let mut unresolved_count = 0usize;
+		let mut imported_for_deps: Vec<(String, ModSource, ProjectType)> =
+			Vec::new();
 
 		for mrpack_file in &index.files {
 			let content_type = if mrpack_file.path.starts_with("resourcepacks/")
@@ -171,9 +180,11 @@ impl ImportCommand {
 				.map(mrpack_env_to_mod_env)
 				.unwrap_or(resolved.env);
 
-			let mod_ron = TrackedMod::builder(&slug, resolved.source)
+			let mod_ron = TrackedMod::builder(&slug, resolved.source.clone())
 				.name(&resolved.name)
+				.description(&resolved.description)
 				.version(&resolved.version)
+				.url(resolved.url.as_deref().unwrap_or(""))
 				.download_url(&download_url)
 				.hash(resolved.hash)
 				.hash_type(resolved.hash_type)
@@ -181,10 +192,27 @@ impl ImportCommand {
 				.project_type(content_type)
 				.env(env)
 				.filename(filename)
+				.unresolved(resolved.unresolved)
 				.build();
 
 			storage.save(content_type, &slug, &mod_ron)?;
-			output::bullet(format!("{} (new)", slug));
+
+			if resolved.unresolved {
+				output::warning(format!(
+					"{} (unresolved - could not find on Modrinth)",
+					slug
+				));
+				unresolved_count += 1;
+			} else {
+				output::bullet(format!("{} (new)", slug));
+				if resolved.source.requires_api() {
+					imported_for_deps.push((
+						slug.clone(),
+						resolved.source.clone(),
+						content_type,
+					));
+				}
+			}
 			added += 1;
 		}
 
@@ -215,30 +243,29 @@ impl ImportCommand {
 			output::success("Updated modpack.toml");
 		}
 
-		output::info("Downloading mod JARs...");
-		let download_summary = crate::services::download_missing_mods(
-			storage,
-			&app.cache,
-			&ctx.http_client,
-			ctx.global.max_concurrent_downloads(),
-		)
-		.await?;
-		output::present_download_summary(&download_summary);
-
-		let mut failed_downloads = 0usize;
-		for (name, e) in &download_summary.failed {
-			output::warning(format!("Failed to download {}: {}", name, e));
-			failed_downloads += 1;
+		if !imported_for_deps.is_empty() {
+			output::info("Resolving dependencies...");
+			self.resolve_import_deps(
+				&imported_for_deps,
+				storage,
+				&ctx,
+				&modpack,
+			)
+			.await?;
 		}
 
 		write_override_data(&override_data)?;
 
+		if unresolved_count > 0 {
+			output::warning(format!(
+				"{} mod(s) could not be resolved and were marked as unresolved. Use 'yammm update' or edit them manually.",
+				unresolved_count
+			));
+		}
+
 		output::success(format!(
-			"Import complete: {} added, {} skipped, {} JARs downloaded, {} JARs failed",
-			added,
-			skipped,
-			download_summary.downloaded,
-			failed_downloads
+			"Import complete: {} added, {} skipped, {} unresolved",
+			added, skipped, unresolved_count
 		));
 
 		Ok(())
@@ -329,6 +356,111 @@ impl ImportCommand {
 			"Done! Modpack ready at: {}",
 			output_dir.display()
 		));
+
+		Ok(())
+	}
+
+	async fn resolve_import_deps(
+		&self,
+		imported: &[(String, ModSource, ProjectType)],
+		storage: &crate::storage::Storage,
+		ctx: &AppContext,
+		modpack: &crate::config::ModpackManifest,
+	) -> Result<()> {
+		let filters = modpack.version_filters();
+		let mc_version = filters
+			.minecraft_version
+			.as_deref()
+			.filter(|s| !s.is_empty());
+		let loader = filters.loader;
+
+		let mut all_resolved: Vec<crate::services::resolver::ResolvedMod> =
+			Vec::new();
+		let mut root_ids: Vec<String> = Vec::new();
+
+		for (slug, source, _project_type) in imported {
+			let mod_id = source.source_id().to_string();
+			root_ids.push(mod_id.clone());
+
+			let mut resolver = DependencyResolver::new(ctx.registry.clone());
+			if let Some(v) = mc_version {
+				resolver = resolver.with_minecraft_version(v);
+			}
+			if let Some(l) = loader {
+				resolver = resolver.with_loader(l);
+			}
+
+			match resolver.resolve(&mod_id, source.clone()).await {
+				Ok(mods) => all_resolved.extend(mods),
+				Err(e) => {
+					output::warning(format!(
+						"Could not resolve dependencies for {}: {}",
+						slug, e
+					));
+				}
+			}
+		}
+
+		if all_resolved.is_empty() {
+			return Ok(());
+		}
+
+		let install_ctx = DepInstallContext {
+			storage,
+			registry: ctx.registry.clone(),
+			mc_version,
+			loader,
+		};
+
+		let categorized = categorize_deps(all_resolved, &root_ids, storage);
+
+		present_incompatible_warnings(&categorized.incompatible_warnings);
+
+		if !categorized.missing_required.is_empty() {
+			prompt_and_install_deps(
+				"Required dependencies",
+				&categorized.missing_required,
+				true,
+				self.yes,
+				false,
+				&install_ctx,
+			)
+			.await?;
+		}
+
+		if !categorized.missing_optional.is_empty() {
+			prompt_and_install_deps(
+				"Optional dependencies",
+				&categorized.missing_optional,
+				false,
+				self.yes,
+				false,
+				&install_ctx,
+			)
+			.await?;
+		}
+
+		let mut dep_by_parent: HashMap<String, Vec<crate::types::Dependency>> =
+			HashMap::new();
+		for dep in &categorized.dep_entries {
+			if let Some(ref parent) = dep.required_by {
+				for root_id in &root_ids {
+					if parent.contains(root_id) {
+						dep_by_parent
+							.entry(root_id.clone())
+							.or_default()
+							.push(dep.clone());
+					}
+				}
+			}
+		}
+
+		for (slug, source, project_type) in imported {
+			let mod_id = source.source_id().to_string();
+			if let Some(deps) = dep_by_parent.get(&mod_id) {
+				record_dep_edges(storage, *project_type, slug, deps)?;
+			}
+		}
 
 		Ok(())
 	}
@@ -478,11 +610,14 @@ fn extract_version_from_path(path: &str) -> String {
 struct ImportedMod {
 	slug: String,
 	name: String,
+	description: String,
 	version: String,
 	source: ModSource,
 	hash: Option<String>,
 	hash_type: HashType,
 	env: ModEnv,
+	url: Option<String>,
+	unresolved: bool,
 }
 
 async fn resolve_mrpack_mod(
@@ -507,14 +642,13 @@ async fn resolve_mrpack_mod(
 
 	if sha512.is_some() || sha1.is_some() {
 		tracing::warn!(
-			"Modrinth hash lookup failed for {}, falling back to path-based resolution",
+			"Modrinth hash lookup failed for {}, falling back to search",
 			path
 		);
 	}
 
 	let path_slug = slugify(&extract_slug_from_path(path));
 	let version = extract_version_from_path(path);
-	let source = determine_source(downloads, &path_slug);
 
 	let hash = sha512
 		.map(|h| h.to_string())
@@ -524,14 +658,36 @@ async fn resolve_mrpack_mod(
 		.or(sha1.map(|_| HashType::Sha1))
 		.unwrap_or_default();
 
+	if let Some(result) = try_resolve_by_search(
+		modrinth_client,
+		&path_slug,
+		&version,
+		&hash,
+		hash_type,
+	)
+	.await
+	{
+		return result;
+	}
+
+	tracing::warn!(
+		"Could not resolve mod from path '{}', marking as unresolved",
+		path
+	);
+
+	let source = determine_source(downloads, &path_slug);
+
 	ImportedMod {
 		slug: path_slug,
 		name: extract_slug_from_path(path),
+		description: String::new(),
 		version,
 		source,
 		hash,
 		hash_type,
 		env: ModEnv::Both,
+		url: None,
+		unresolved: true,
 	}
 }
 
@@ -546,12 +702,6 @@ async fn try_resolve_by_hash(
 		.get_version_by_hash(hash, algorithm)
 		.await
 		.ok()?;
-
-	let name = if version_data.name.is_empty() {
-		version_data.version_number.clone()
-	} else {
-		version_data.name
-	};
 
 	let project_result = modrinth_client
 		.get_project_direct(&version_data.mod_id)
@@ -568,22 +718,79 @@ async fn try_resolve_by_hash(
 		Err(_) => slugify(&version_data.mod_id),
 	};
 
-	let env = match &project_result {
-		Ok(project) => crate::providers::modrinth::mod_env_from_modrinth_sides(
-			project.client_side.as_deref(),
-			project.server_side.as_deref(),
+	let (name, description, url, env) = match &project_result {
+		Ok(project) => {
+			let env = crate::providers::modrinth::mod_env_from_modrinth_sides(
+				project.client_side.as_deref(),
+				project.server_side.as_deref(),
+			);
+			(
+				project.title.clone(),
+				project.description.clone(),
+				Some(format!("https://modrinth.com/mod/{}", slug)),
+				env,
+			)
+		}
+		Err(_) => (
+			version_data.version_number.clone(),
+			String::new(),
+			None,
+			ModEnv::Both,
 		),
-		Err(_) => ModEnv::Both,
 	};
 
 	Some(ImportedMod {
-		slug,
+		slug: slug.clone(),
 		name,
+		description,
 		version: version_data.version_number,
-		source: ModSource::modrinth(&version_data.mod_id),
+		source: ModSource::modrinth(&slug),
 		hash: Some(hash.to_string()),
 		hash_type,
 		env,
+		url,
+		unresolved: false,
+	})
+}
+
+async fn try_resolve_by_search(
+	modrinth_client: &ModrinthClient,
+	slug: &str,
+	version: &str,
+	hash: &Option<String>,
+	hash_type: HashType,
+) -> Option<ImportedMod> {
+	let hits = modrinth_client.search(slug, Some(5)).await.ok()?;
+
+	let normalized_slug = slug.to_lowercase().replace('-', " ");
+	let hit = hits.iter().find(|h| {
+		h.slug == slug
+			|| h.slug.to_lowercase() == slug.to_lowercase()
+			|| h.title.to_lowercase().replace('-', " ") == normalized_slug
+	})?;
+
+	let resolved_slug = if hit.slug.is_empty() {
+		slug.to_string()
+	} else {
+		hit.slug.clone()
+	};
+
+	let env = crate::providers::modrinth::mod_env_from_modrinth_sides(
+		hit.client_side.as_deref(),
+		hit.server_side.as_deref(),
+	);
+
+	Some(ImportedMod {
+		slug: resolved_slug.clone(),
+		name: hit.title.clone(),
+		description: hit.description.clone(),
+		version: version.to_string(),
+		source: ModSource::modrinth(&resolved_slug),
+		hash: hash.clone(),
+		hash_type,
+		env,
+		url: Some(format!("https://modrinth.com/mod/{}", resolved_slug)),
+		unresolved: false,
 	})
 }
 

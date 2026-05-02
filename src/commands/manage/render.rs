@@ -164,14 +164,30 @@ fn draw_mod_list(
 			} else {
 				Style::default()
 			};
-			let line = Line::from(vec![
-				Span::styled(m.name.clone(), style),
-				Span::raw(" "),
-				Span::styled(
-					format!("[{}]", source_short_tag(&m.source)),
-					style.fg(source_color(&m.source)),
-				),
-			]);
+			let line = if m.unresolved {
+				Line::from(vec![
+					Span::styled(m.name.clone(), style),
+					Span::raw(" "),
+					Span::styled(
+						format!("[{}]", source_short_tag(&m.source)),
+						style.fg(source_color(&m.source)),
+					),
+					Span::raw(" "),
+					Span::styled(
+						"[!]".to_string(),
+						Style::default().fg(Color::Yellow),
+					),
+				])
+			} else {
+				Line::from(vec![
+					Span::styled(m.name.clone(), style),
+					Span::raw(" "),
+					Span::styled(
+						format!("[{}]", source_short_tag(&m.source)),
+						style.fg(source_color(&m.source)),
+					),
+				])
+			};
 			ListItem::new(line)
 		})
 		.collect();
@@ -239,6 +255,22 @@ fn draw_detail(
 				app.selected_field() == DetailField::Version && detail_focused,
 			));
 			v.push(read_only_row("Source", source_label(&m.source)));
+
+			if m.unresolved {
+				v.push(Line::from(vec![
+					Span::styled(
+						"  Unresolved: ",
+						Style::default().fg(Color::Yellow),
+					),
+					Span::styled(
+						"Yes",
+						Style::default()
+							.fg(Color::Yellow)
+							.add_modifier(Modifier::BOLD),
+					),
+				]));
+			}
+
 			v.push(field_row(
 				DetailField::Env,
 				m.env.as_str(),

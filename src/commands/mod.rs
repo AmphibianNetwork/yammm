@@ -1,6 +1,6 @@
 //! CLI subcommand definitions and dispatch.
 
-mod add;
+pub(crate) mod add;
 mod auth;
 mod cache;
 mod completions;

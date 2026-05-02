@@ -58,6 +58,10 @@ pub async fn check_for_updates(
 			continue;
 		}
 
+		if mod_ron.unresolved {
+			continue;
+		}
+
 		let provider = match registry.get(&mod_ron.source) {
 			Ok(p) => p.clone(),
 			Err(_) => continue,

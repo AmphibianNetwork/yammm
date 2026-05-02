@@ -431,7 +431,12 @@ impl ManageApp {
 
 	pub fn start_edit_version(&mut self) {
 		if let Some(m) = self.selected_mod() {
-			if m.source.requires_api() {
+			if m.unresolved {
+				self.set_status(
+					StatusKind::Warning,
+					"Cannot change version for unresolved mods".to_string(),
+				);
+			} else if m.source.requires_api() {
 				self.version_list = Vec::new();
 				self.version_list_selected = 0;
 				self.version_list_scroll = 0;
@@ -672,7 +677,12 @@ impl ManageApp {
 
 	pub fn start_update_check(&mut self) {
 		if let Some(m) = self.selected_mod() {
-			if m.source.requires_api() {
+			if m.unresolved {
+				self.set_status(
+					StatusKind::Warning,
+					"Cannot check updates for unresolved mods".to_string(),
+				);
+			} else if m.source.requires_api() {
 				self.update_loading = true;
 				self.update_result = None;
 				self.update_error = None;
