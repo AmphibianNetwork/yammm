@@ -43,11 +43,8 @@ impl std::fmt::Display for LaunchSide {
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(unix)]
 static CHILD_PID: std::sync::atomic::AtomicU32 =
 	std::sync::atomic::AtomicU32::new(0);
-#[cfg(windows)]
-static CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 
 fn install_signal_handlers() {
 	#[cfg(unix)]
@@ -73,10 +70,11 @@ fn install_signal_handlers() {
 	{
 		let _ = ctrlc::set_handler(|| {
 			INTERRUPTED.store(true, Ordering::Relaxed);
-			if let Ok(mut guard) = CHILD.lock() {
-				if let Some(child) = guard.as_mut() {
-					let _ = child.kill();
-				}
+			let pid = CHILD_PID.load(Ordering::Relaxed);
+			if pid > 0 {
+				let _ = std::process::Command::new("taskkill")
+					.args(["/PID", &pid.to_string(), "/T", "/F"])
+					.spawn();
 			}
 		});
 	}
@@ -97,16 +95,7 @@ fn spawn_java_process(
 	mut cmd: std::process::Command
 ) -> Result<std::process::Child> {
 	let child = cmd.spawn()?;
-	#[cfg(unix)]
-	{
-		CHILD_PID.store(child.id(), Ordering::Relaxed);
-	}
-	#[cfg(windows)]
-	{
-		if let Ok(mut guard) = CHILD.lock() {
-			*guard = Some(child.try_clone()?);
-		}
-	}
+	CHILD_PID.store(child.id(), Ordering::Relaxed);
 	Ok(child)
 }
 
