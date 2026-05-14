@@ -11,7 +11,7 @@ pub use libraries::{
 };
 pub use processors::Processor;
 pub use profile::InstallProfile;
-pub use templates::{maven_coords_to_path, DataEntry, TemplateContext};
+pub use templates::{DataEntry, TemplateContext, maven_coords_to_path};
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -79,6 +79,11 @@ async fn run_install_inner(
 ) -> Result<LoaderInstallResult> {
 	let lib_dir = ctx.cache_dir.join("libraries");
 
+	let installer_temp = std::env::temp_dir()
+		.join(format!("yammm-installer-{}", std::process::id()));
+	std::fs::create_dir_all(&installer_temp)?;
+	let _cleanup = crate::utils::TempDirCleanup(&installer_temp);
+
 	let profile_libs = libraries::download_profile_libraries(
 		profile,
 		ctx.cache_dir,
@@ -112,6 +117,7 @@ async fn run_install_inner(
 			installer_jar: ctx.installer_jar,
 			mc_jar: ctx.mc_jar,
 			root_dir: ctx.root_dir,
+			temp_dir: &installer_temp,
 		};
 
 		for (i, processor) in processors_for_side.iter().enumerate() {
@@ -164,64 +170,14 @@ async fn run_install_inner(
 		.get("arguments")
 		.and_then(|a| a.get("jvm"))
 		.and_then(|j| j.as_array())
-		.map(|arr| {
-			arr.iter()
-				.flat_map(|entry| match entry {
-					serde_json::Value::String(s) => vec![s.clone()],
-					serde_json::Value::Object(obj) => {
-						let Some(rules) = obj.get("rules") else {
-							return Vec::new();
-						};
-						if !crate::api::minecraft::evaluate_rules(rules) {
-							return Vec::new();
-						}
-						match obj.get("value") {
-							Some(serde_json::Value::String(s)) => {
-								vec![s.clone()]
-							}
-							Some(serde_json::Value::Array(a)) => a
-								.iter()
-								.filter_map(|v| v.as_str().map(String::from))
-								.collect(),
-							_ => Vec::new(),
-						}
-					}
-					_ => Vec::new(),
-				})
-				.collect()
-		})
+		.map(|arr| crate::api::minecraft::resolve_args_array(arr))
 		.unwrap_or_default();
 
 	let game_args = version_json
 		.get("arguments")
 		.and_then(|a| a.get("game"))
 		.and_then(|g| g.as_array())
-		.map(|arr| {
-			arr.iter()
-				.flat_map(|entry| match entry {
-					serde_json::Value::String(s) => vec![s.clone()],
-					serde_json::Value::Object(obj) => {
-						let Some(rules) = obj.get("rules") else {
-							return Vec::new();
-						};
-						if !crate::api::minecraft::evaluate_rules(rules) {
-							return Vec::new();
-						}
-						match obj.get("value") {
-							Some(serde_json::Value::String(s)) => {
-								vec![s.clone()]
-							}
-							Some(serde_json::Value::Array(a)) => a
-								.iter()
-								.filter_map(|v| v.as_str().map(String::from))
-								.collect(),
-							_ => Vec::new(),
-						}
-					}
-					_ => Vec::new(),
-				})
-				.collect()
-		})
+		.map(|arr| crate::api::minecraft::resolve_args_array(arr))
 		.unwrap_or_default();
 
 	profile::extract_launch_args_from_installer(ctx.installer_jar, &lib_dir)?;

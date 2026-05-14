@@ -66,6 +66,7 @@ pub struct AppContext {
 	pub insecure: bool,
 	pub http_client: reqwest::Client,
 	cache_dir: PathBuf,
+	jar_cache: JarCache,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -159,12 +160,18 @@ impl AppContext {
 			insecure,
 			http_client,
 			cache_dir,
+			jar_cache,
 		})
 	}
 
 	fn build_http_client(insecure: bool) -> reqwest::Client {
 		let mut builder = reqwest::Client::builder()
-			.user_agent(format!("yammm/{}", env!("CARGO_PKG_VERSION")));
+			.user_agent(format!(
+				"AmphibianNetwork/yammm/{} (contact@amphibian.network)",
+				env!("CARGO_PKG_VERSION")
+			))
+			.connect_timeout(std::time::Duration::from_secs(10))
+			.timeout(std::time::Duration::from_secs(30));
 		if insecure {
 			builder = builder.danger_accept_invalid_certs(true);
 		}
@@ -214,6 +221,11 @@ impl AppContext {
 	/// Get the global cache directory path
 	pub fn cache_dir(&self) -> &Path {
 		&self.cache_dir
+	}
+
+	/// Get the shared JAR cache instance.
+	pub fn jar_cache(&self) -> &JarCache {
+		&self.jar_cache
 	}
 
 	/// Check if we're currently in a modpack directory.

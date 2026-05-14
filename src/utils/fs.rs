@@ -70,29 +70,31 @@ fn list_files_recursive(
 	path: &Path,
 	include_symlinks: bool,
 ) -> std::io::Result<()> {
-	if let Ok(metadata) = std::fs::symlink_metadata(path) {
-		if metadata.file_type().is_dir() {
-			for entry in std::fs::read_dir(path)? {
-				let full_path = entry?.path();
-				let metadata = std::fs::symlink_metadata(&full_path)?;
+	if let Ok(metadata) = std::fs::symlink_metadata(path)
+		&& metadata.file_type().is_dir()
+	{
+		for entry in std::fs::read_dir(path)? {
+			let full_path = entry?.path();
+			let metadata = std::fs::symlink_metadata(&full_path)?;
 
-				if !include_symlinks && metadata.file_type().is_symlink() {
-					continue;
-				}
+			if !include_symlinks && metadata.file_type().is_symlink() {
+				continue;
+			}
 
-				if metadata.file_type().is_dir() {
-					list_files_recursive(vec, &full_path, include_symlinks)?;
-				} else {
-					vec.push(full_path);
-				}
+			if metadata.file_type().is_dir() {
+				list_files_recursive(vec, &full_path, include_symlinks)?;
+			} else {
+				vec.push(full_path);
 			}
 		}
 	}
 	Ok(())
 }
 
-/// Write data to a file, creating parent directories.
-/// On Unix, sets the file permissions to 0o600 (owner read/write only).
+/// Write data to a file with restricted permissions.
+///
+/// On Unix, creates the file with `0o600` permissions from the start (no
+/// window where the file is world-readable), then writes data.
 /// On Windows, the file inherits the per-user ACL of the parent directory
 /// (typically `%APPDATA%`), which provides equivalent protection.
 pub fn write_secret_file(
@@ -103,16 +105,42 @@ pub fn write_secret_file(
 		std::fs::create_dir_all(parent)
 			.context("Failed to create parent directory")?;
 	}
-	std::fs::write(path, data).context("Failed to write file")?;
 
 	#[cfg(unix)]
 	{
-		use std::os::unix::fs::PermissionsExt;
-		std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-			.context("Failed to set file permissions")?;
+		use std::os::unix::fs::OpenOptionsExt;
+		std::fs::OpenOptions::new()
+			.write(true)
+			.create(true)
+			.truncate(true)
+			.mode(0o600)
+			.open(path)
+			.and_then(|mut f| {
+				use std::io::Write;
+				f.write_all(data.as_bytes())
+			})
+			.context("Failed to write secret file")?;
+	}
+
+	#[cfg(not(unix))]
+	{
+		std::fs::write(path, data).context("Failed to write file")?;
 	}
 
 	Ok(())
+}
+
+/// RAII guard that removes a directory tree when dropped.
+///
+/// Used for temporary directories that need deterministic cleanup
+/// (e.g. installer extraction dirs) without depending on the `tempfile` crate
+/// in production code.
+pub struct TempDirCleanup<'a>(pub &'a Path);
+
+impl Drop for TempDirCleanup<'_> {
+	fn drop(&mut self) {
+		let _ = std::fs::remove_dir_all(self.0);
+	}
 }
 
 /// List all files in a directory tree, optionally including symlinks.

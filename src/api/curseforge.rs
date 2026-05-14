@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::error::ApiError;
 use crate::api::ApiClient;
+use crate::api::error::ApiError;
 use crate::types::{
 	DependencyKind, HashType, ModInfo, ModSource, ModVersion, ProjectType,
 };
@@ -165,7 +165,7 @@ impl CurseForgeClient {
 			source: ModSource::curseforge(project.id.to_string()),
 			minecraft_versions: project.game_versions.unwrap_or_default(),
 			loaders,
-			downloads: project.download_count as u64,
+			downloads: project.download_count.max(0) as u64,
 			url,
 			project_type,
 			client_side: None,
@@ -188,7 +188,7 @@ impl CurseForgeClient {
 			download_url,
 			hash,
 			hash_type: hash_type.unwrap_or_default(),
-			file_size: file.file_size as u64,
+			file_size: file.file_size.max(0) as u64,
 			release_date: file.file_date,
 		}
 	}

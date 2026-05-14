@@ -196,20 +196,21 @@ fn should_include_library(lib: &Library) -> bool {
 }
 
 fn rule_matches_os(os_rule: &Option<OsRule>) -> bool {
-	let Some(ref os) = os_rule else {
+	let Some(os) = os_rule else {
 		return true;
 	};
 
-	if let Some(ref name) = os.name {
-		if name != crate::utils::current_os_name() {
-			return false;
-		}
+	if let Some(ref name) = os.name
+		&& name != crate::utils::current_os_name()
+	{
+		return false;
 	}
 
-	if let Some(ref arch) = os.arch {
-		if arch == "x86" && !cfg!(target_arch = "x86") {
-			return false;
-		}
+	if let Some(ref arch) = os.arch
+		&& arch == "x86"
+		&& !cfg!(target_arch = "x86")
+	{
+		return false;
 	}
 
 	true
@@ -218,7 +219,7 @@ fn rule_matches_os(os_rule: &Option<OsRule>) -> bool {
 fn rule_matches_features(
 	features: &Option<std::collections::BTreeMap<String, serde_json::Value>>
 ) -> bool {
-	let Some(ref features) = features else {
+	let Some(features) = features else {
 		return true;
 	};
 	for value in features.values() {

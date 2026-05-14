@@ -115,20 +115,18 @@ pub fn maven_url(
 	let c = MavenCoords::parse(maven_coords);
 	let base = base_url.trim_end_matches('/');
 	format!(
-		"{}/{}/{}/{}/{}-{}.jar",
+		"{}/{}/{}/{}/{}",
 		base,
 		c.group_path(),
 		c.artifact,
 		c.version,
-		c.artifact,
-		c.version
+		c.filename()
 	)
 }
 
-/// Extracts `artifact-version.jar` from Maven coordinates. Replaces `+` with `_`.
+/// Extracts the filename from Maven coordinates. Respects classifier and extension.
 pub fn filename(coords: &str) -> String {
-	let c = MavenCoords::parse(coords);
-	format!("{}-{}.jar", c.artifact.replace('+', "_"), c.version)
+	MavenCoords::parse(coords).filename()
 }
 
 /// Extracts the `artifact-version` stem (no extension). Used for classpath dedup.
@@ -144,15 +142,15 @@ pub fn parse_maven_versions(
 
 	for line in xml.lines() {
 		let line = line.trim();
-		if let Some(content) = line.strip_prefix("<version>") {
-			if let Some(version) = content.strip_suffix("</version>") {
-				if let Some(prefix) = prefix_filter {
-					if version.starts_with(prefix) {
-						versions.push(version.to_string());
-					}
-				} else {
+		if let Some(content) = line.strip_prefix("<version>")
+			&& let Some(version) = content.strip_suffix("</version>")
+		{
+			if let Some(prefix) = prefix_filter {
+				if version.starts_with(prefix) {
 					versions.push(version.to_string());
 				}
+			} else {
+				versions.push(version.to_string());
 			}
 		}
 	}

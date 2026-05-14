@@ -94,6 +94,12 @@ impl Default for RetryConfig {
 	}
 }
 
+/// Auth-specific retry preset: 2 retries, 1s initial delay.
+pub const AUTH_RETRY_CONFIG: RetryConfig = RetryConfig {
+	max_retries: 2,
+	initial_delay_ms: 1000,
+};
+
 /// Execute an async operation with exponential backoff.
 /// Retries on 429, 5xx, and network errors. Returns immediately on other errors.
 pub async fn retry_request<F, Fut, T>(
@@ -160,21 +166,47 @@ fn is_retryable(err: &anyhow::Error) -> bool {
 	false
 }
 
-/// Calculate retry delay. Honors `Retry-After` for 429, otherwise exponential backoff.
+/// Calculate retry delay. Honors `Retry-After` for 429, otherwise exponential
+/// backoff with ±25% jitter to avoid thundering herd.
 fn retry_delay(
 	err: &anyhow::Error,
 	attempt: u32,
 	initial_delay_ms: u64,
 ) -> Duration {
-	if let Some(meta) = err.downcast_ref::<ResponseMeta>() {
-		if meta.status == 429 {
-			if let Some(secs) = meta.retry_after {
-				return Duration::from_secs(secs);
-			}
-		}
+	if let Some(meta) = err.downcast_ref::<ResponseMeta>()
+		&& meta.status == 429
+		&& let Some(secs) = meta.retry_after
+	{
+		return Duration::from_secs(secs);
 	}
 
-	Duration::from_millis(initial_delay_ms * 2u64.pow(attempt))
+	let base_ms = initial_delay_ms * 2u64.pow(attempt);
+	let jitter = (base_ms as f64 * 0.25 * rand_jitter_factor()) as u64;
+	Duration::from_millis(base_ms + jitter)
+}
+
+/// Returns a value in [-1.0, 1.0) for jitter calculation.
+/// Uses a simple xorshift PRNG seeded from the current time and thread id
+/// to avoid adding `rand` as a dependency.
+fn rand_jitter_factor() -> f64 {
+	use std::sync::atomic::{AtomicU64, Ordering};
+	static SEED: AtomicU64 = AtomicU64::new(0);
+	static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+	let mut seed = SEED.load(Ordering::Relaxed);
+	if seed == 0 {
+		seed = (std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap_or_default()
+			.as_nanos() as u64)
+			.wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed));
+	}
+	seed ^= seed << 13;
+	seed ^= seed >> 7;
+	seed ^= seed << 17;
+	SEED.store(seed, Ordering::Relaxed);
+
+	(seed & 0xFFFF) as f64 / 0xFFFF as f64 * 2.0 - 1.0
 }
 
 /// Send a GET request with retry, mapping error via closure.
@@ -230,6 +262,104 @@ pub async fn send_retried(
 		Ok(resp) => Ok(resp),
 		Err(e) => Err(RetryError::from_anyhow(&e)),
 	}
+}
+
+/// Send an arbitrary HTTP request with retry. Takes a closure that builds and
+/// sends the request each attempt (avoids `RequestBuilder::try_clone` issues
+/// for non-cloneable bodies). Retries on 429/5xx and network errors.
+pub async fn send_retried_request<F, Fut>(
+	config: &RetryConfig,
+	mut f: F,
+) -> Result<reqwest::Response, RetryError>
+where
+	F: FnMut() -> Fut,
+	Fut: std::future::Future<
+			Output = Result<reqwest::Response, crate::errors::YammmError>,
+		>,
+{
+	let mut last_err: Option<anyhow::Error> = None;
+
+	for attempt in 0..=config.max_retries {
+		match f().await {
+			Ok(resp) => {
+				let status = resp.status().as_u16();
+				if status == 429 || (500..=599).contains(&status) {
+					let retry_after =
+						ResponseMeta::from_response(&resp).retry_after;
+					let err =
+						crate::errors::YammmError::network_error(format!(
+							"HTTP {} (retry-after: {:?})",
+							status, retry_after
+						));
+					if attempt < config.max_retries {
+						let delay = if status == 429 {
+							retry_after.map(Duration::from_secs).unwrap_or_else(
+								|| {
+									exponential_delay(
+										attempt,
+										config.initial_delay_ms,
+									)
+								},
+							)
+						} else {
+							exponential_delay(attempt, config.initial_delay_ms)
+						};
+						tracing::warn!(
+							"Retry {}/{} in {}ms: {}",
+							attempt + 1,
+							config.max_retries,
+							delay.as_millis(),
+							err
+						);
+						tokio::time::sleep(delay).await;
+					}
+					last_err = Some(err.into());
+					continue;
+				}
+				return Ok(resp);
+			}
+			Err(e) => {
+				if !e.is_retryable() {
+					return Err(RetryError {
+						status: 0,
+						message: e.to_string(),
+					});
+				}
+
+				if attempt < config.max_retries {
+					let delay =
+						exponential_delay(attempt, config.initial_delay_ms);
+					tracing::warn!(
+						"Retry {}/{} in {}ms: {}",
+						attempt + 1,
+						config.max_retries,
+						delay.as_millis(),
+						e
+					);
+					tokio::time::sleep(delay).await;
+				}
+
+				last_err = Some(e.into());
+			}
+		}
+	}
+
+	Err(RetryError::from_anyhow(&last_err.unwrap_or_else(|| {
+		crate::errors::YammmError::network_error(format!(
+			"Request failed after {} retries",
+			config.max_retries
+		))
+		.into()
+	})))
+}
+
+fn exponential_delay(
+	attempt: u32,
+	initial_delay_ms: u64,
+) -> Duration {
+	let base_ms = initial_delay_ms * 2u64.pow(attempt);
+	let jitter = (base_ms as f64 * 0.25 * rand_jitter_factor()) as u64;
+	Duration::from_millis(base_ms + jitter)
 }
 
 #[cfg(test)]
@@ -415,8 +545,11 @@ mod tests {
 	fn test_retry_delay_exponential_backoff() {
 		let err: anyhow::Error =
 			crate::errors::YammmError::network_error("timeout").into();
-		assert_eq!(retry_delay(&err, 0, 500), Duration::from_millis(500));
-		assert_eq!(retry_delay(&err, 1, 500), Duration::from_millis(1000));
-		assert_eq!(retry_delay(&err, 2, 500), Duration::from_millis(2000));
+		let d0 = retry_delay(&err, 0, 500).as_millis();
+		let d1 = retry_delay(&err, 1, 500).as_millis();
+		let d2 = retry_delay(&err, 2, 500).as_millis();
+		assert!((375..=625).contains(&(d0 as u64)), "attempt 0: {}", d0);
+		assert!((750..=1250).contains(&(d1 as u64)), "attempt 1: {}", d1);
+		assert!((1500..=2500).contains(&(d2 as u64)), "attempt 2: {}", d2);
 	}
 }

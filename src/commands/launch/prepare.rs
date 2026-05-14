@@ -74,11 +74,10 @@ pub(super) async fn prepare_launch(
 		super::LaunchSide::Server => version_info.downloads.server.as_ref(),
 	}
 	.ok_or_else(|| {
-		anyhow::anyhow!(
+		crate::errors::YammmError::download_failed(format!(
 			"No {} download for MC {}",
-			side,
-			modpack.minecraft_version
-		)
+			side, modpack.minecraft_version
+		))
 	})?;
 
 	let mc_jar = mc_client
@@ -90,11 +89,11 @@ pub(super) async fn prepare_launch(
 		)
 		.await?;
 
-	if side == super::LaunchSide::Client {
-		if let Some(ref asset_index) = version_info.asset_index {
-			let assets_dir = mc_cache.join("assets");
-			mc_client.download_assets(asset_index, &assets_dir).await?;
-		}
+	if side == super::LaunchSide::Client
+		&& let Some(ref asset_index) = version_info.asset_index
+	{
+		let assets_dir = mc_cache.join("assets");
+		mc_client.download_assets(asset_index, &assets_dir).await?;
 	}
 
 	let mut classpath_jars = vec![mc_jar.clone()];
@@ -363,8 +362,8 @@ fn is_bundler_jar(jar_path: &Path) -> bool {
 	let Ok(mut archive) = zip::ZipArchive::new(file) else {
 		return false;
 	};
-	let result = archive.by_name("META-INF/versions.list").is_ok();
-	result
+
+	archive.by_name("META-INF/versions.list").is_ok()
 }
 
 fn deduplicate_classpath(

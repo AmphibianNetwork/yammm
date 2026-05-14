@@ -80,19 +80,24 @@ impl std::fmt::Display for OutputFormat {
 }
 
 impl std::str::FromStr for OutputFormat {
-	type Err = String;
+	type Err = OutputFormatParseError;
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s.to_lowercase().as_str() {
 			"table" => Ok(OutputFormat::Table),
 			"compact" => Ok(OutputFormat::Compact),
 			"json" => Ok(OutputFormat::Json),
-			other => Err(format!(
-				"Unknown output format: '{}'. Valid: table, compact, json",
-				other
-			)),
+			other => Err(OutputFormatParseError {
+				input: other.to_string(),
+			}),
 		}
 	}
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Unknown output format: '{input}'. Valid: table, compact, json")]
+pub struct OutputFormatParseError {
+	pub input: String,
 }
 
 const fn default_true() -> bool {

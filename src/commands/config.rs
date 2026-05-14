@@ -74,7 +74,11 @@ impl ConfigCommand {
 			}
 			ConfigSubcommand::Show => {
 				output::heading("Global configuration");
-				let toml_string = toml::to_string_pretty(&ctx.global)?;
+				let mut display_config = ctx.global.clone();
+				if let Some(ref key) = display_config.api_keys.curseforge {
+					display_config.api_keys.curseforge = Some(redact_key(key));
+				}
+				let toml_string = toml::to_string_pretty(&display_config)?;
 				println!("{}", toml_string);
 			}
 			ConfigSubcommand::Get { key } => {
@@ -104,6 +108,14 @@ impl ConfigCommand {
 	}
 }
 
+fn redact_key(key: &str) -> String {
+	if key.len() <= 8 {
+		"***".to_string()
+	} else {
+		format!("{}***{}", &key[..4], &key[key.len() - 4..])
+	}
+}
+
 fn get_config_value(
 	config: &crate::config::GlobalConfig,
 	key: &ConfigKey,
@@ -127,9 +139,12 @@ fn get_config_value(
 			.max_concurrent_downloads
 			.map(|v| v.to_string())
 			.unwrap_or_default()),
-		ConfigKey::ApiKeysCurseforge => {
-			Ok(config.api_keys.curseforge.clone().unwrap_or_default())
-		}
+		ConfigKey::ApiKeysCurseforge => Ok(config
+			.api_keys
+			.curseforge
+			.as_ref()
+			.map(|k| redact_key(k))
+			.unwrap_or_default()),
 		ConfigKey::OutputFormat => Ok(config.output.format.to_string()),
 		ConfigKey::OutputColor => Ok(config.output.color.to_string()),
 	}
@@ -172,8 +187,9 @@ fn set_config_value(
 			};
 		}
 		ConfigKey::OutputFormat => {
-			config.output.format =
-				value.parse().map_err(YammmError::config_error)?;
+			config.output.format = value
+				.parse::<crate::config::OutputFormat>()
+				.map_err(|e| YammmError::config_error(e.to_string()))?;
 		}
 		ConfigKey::OutputColor => {
 			config.output.color = value.parse().map_err(|_| {

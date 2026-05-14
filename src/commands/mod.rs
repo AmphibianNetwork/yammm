@@ -10,10 +10,13 @@ mod import;
 mod info;
 mod init;
 mod launch;
+#[cfg(feature = "tui")]
 mod manage;
+#[cfg(feature = "tui")]
 mod organize;
 mod remove;
 mod search;
+mod self_update;
 mod update;
 
 pub use add::AddCommand;
@@ -26,10 +29,13 @@ pub use import::ImportCommand;
 pub use info::InfoCommand;
 pub use init::InitCommand;
 pub use launch::LaunchCommand;
+#[cfg(feature = "tui")]
 pub use manage::ManageCommand;
+#[cfg(feature = "tui")]
 pub use organize::OrganizeCommand;
 pub use remove::RemoveCommand;
 pub use search::SearchCommand;
+pub use self_update::SelfUpdateCommand;
 pub use update::UpdateCommand;
 
 use crate::app::AppContext;
@@ -112,13 +118,18 @@ pub enum Command {
 	/// Update mods to their latest versions
 	Update(UpdateCommand),
 
+	/// Update yammm to the latest version
+	SelfUpdate(SelfUpdateCommand),
+
 	/// Generate shell completions
 	Completions(CompletionsCommand),
 
 	/// Organize orphan config files to their mod directories
+	#[cfg(feature = "tui")]
 	Organize(OrganizeCommand),
 
 	/// Interactive modpack management TUI
+	#[cfg(feature = "tui")]
 	Manage(ManageCommand),
 }
 
@@ -141,8 +152,11 @@ impl Command {
 			Command::Cache(cmd) => cmd.run(ctx).await,
 			Command::Config(cmd) => cmd.run(ctx).await,
 			Command::Update(cmd) => cmd.run(ctx).await,
+			Command::SelfUpdate(cmd) => cmd.run(ctx).await,
 			Command::Completions(cmd) => cmd.run(ctx).await,
+			#[cfg(feature = "tui")]
 			Command::Organize(cmd) => cmd.run(ctx).await,
+			#[cfg(feature = "tui")]
 			Command::Manage(cmd) => cmd.run(ctx).await,
 		}
 	}

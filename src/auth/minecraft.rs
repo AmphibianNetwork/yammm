@@ -23,18 +23,35 @@ pub async fn login_with_xbox(
 	xsts_token: &str,
 	xsts_uhs: &str,
 ) -> Result<String> {
-	let resp: McLoginResponse = http_client
-		.post(
-			"https://api.minecraftservices.com/authentication/login_with_xbox",
-		)
-		.header("Content-Type", "application/json")
-		.json(&serde_json::json!({
-			"identityToken": format!("XBL3.0 x={};{}", xsts_uhs, xsts_token),
-		}))
-		.send()
-		.await?
-		.json()
-		.await?;
+	let xsts_token_owned = xsts_token.to_string();
+	let xsts_uhs_owned = xsts_uhs.to_string();
+	let resp: McLoginResponse = crate::api::retry::send_retried_request(
+		&crate::api::retry::AUTH_RETRY_CONFIG,
+		|| {
+			let client = http_client.clone();
+			let token = xsts_token_owned.clone();
+			let uhs = xsts_uhs_owned.clone();
+			async move {
+				client
+					.post(
+						"https://api.minecraftservices.com/authentication/login_with_xbox",
+					)
+					.header("Content-Type", "application/json")
+					.json(&serde_json::json!({
+						"identityToken": format!("XBL3.0 x={};{}", uhs, token),
+					}))
+					.send()
+					.await
+					.map_err(|e| {
+						crate::errors::YammmError::network_error(e.to_string())
+					})
+			}
+		},
+	)
+	.await
+	.map_err(|e| crate::errors::YammmError::network_error(e.to_string()))?
+	.json()
+	.await?;
 
 	Ok(resp.access_token)
 }
@@ -47,11 +64,26 @@ pub async fn get_profile(
 	http_client: &reqwest::Client,
 	mc_access_token: &str,
 ) -> Result<McProfile> {
-	let resp = http_client
-		.get("https://api.minecraftservices.com/minecraft/profile")
-		.header("Authorization", format!("Bearer {}", mc_access_token))
-		.send()
-		.await?;
+	let token_owned = mc_access_token.to_string();
+	let resp = crate::api::retry::send_retried_request(
+		&crate::api::retry::AUTH_RETRY_CONFIG,
+		|| {
+			let client = http_client.clone();
+			let token = token_owned.clone();
+			async move {
+				client
+					.get("https://api.minecraftservices.com/minecraft/profile")
+					.header("Authorization", format!("Bearer {}", token))
+					.send()
+					.await
+					.map_err(|e| {
+						crate::errors::YammmError::network_error(e.to_string())
+					})
+			}
+		},
+	)
+	.await
+	.map_err(|e| crate::errors::YammmError::network_error(e.to_string()))?;
 
 	if !resp.status().is_success() {
 		return Err(crate::errors::YammmError::network_error(

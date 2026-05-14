@@ -68,16 +68,16 @@ pub fn parse_java_version(stderr: &str) -> Option<i32> {
 /// (e.g. `1.8` → 8).
 fn parse_java_version_string(s: &str) -> i32 {
 	let mut parts = s.split(&['.', '_', '-'][..]);
-	if let Some(first) = parts.next() {
-		if let Ok(major) = first.parse::<i32>() {
-			if major == 1 {
-				if let Some(second) = parts.next() {
-					return second.parse::<i32>().unwrap_or(8);
-				}
-				return 8;
+	if let Some(first) = parts.next()
+		&& let Ok(major) = first.parse::<i32>()
+	{
+		if major == 1 {
+			if let Some(second) = parts.next() {
+				return second.parse::<i32>().unwrap_or(8);
 			}
-			return major;
+			return 8;
 		}
+		return major;
 	}
 	8
 }
@@ -340,10 +340,10 @@ pub async fn resolve_java(
 		return Ok((path.to_path_buf(), version));
 	}
 
-	if let Some(java_bin) = find_cached_java(cache_dir, required) {
-		if let Ok(major) = detect_java_version(&java_bin) {
-			return Ok((java_bin, major));
-		}
+	if let Some(java_bin) = find_cached_java(cache_dir, required)
+		&& let Ok(major) = detect_java_version(&java_bin)
+	{
+		return Ok((java_bin, major));
 	}
 
 	install_jdk(cache_dir, required, http_client).await

@@ -7,27 +7,41 @@ yammm separates mod source interactions into two layers:
 - **API clients** (`api/`): Raw HTTP wrappers for external services
 - **Providers** (`providers/`): Implement the `ModSourceProvider` trait, translating API responses into domain types
 
-Commands interact with providers, never with API clients directly.
+Commands interact with the `Provider` enum, never with API clients directly.
 
 ---
 
 ## ModSourceProvider Trait
 
-The core abstraction that unifies all 3 mod sources:
+The core abstraction that unifies all 3 mod sources. Uses native async fn in trait (Rust 1.75+), not `async_trait`:
 
 ```rust
-#[async_trait]
-pub trait ModSourceProvider: Send + Sync {
+#[allow(async_fn_in_trait)]
+pub trait ModSourceProvider {
     fn name(&self) -> &str;
     fn supports_search(&self) -> bool;
+    fn get_mod_env(&self, mod_info: &ModInfo) -> ModEnv;
 
     async fn search(&self, query: &str, filters: &SearchFilters) -> Result<Vec<ModInfo>>;
-    async fn get_mod(&self, source: &ModSource) -> Result<ModInfo>;
-    async fn get_versions(&self, source: &ModSource) -> Result<Vec<ModVersion>>;
-    async fn get_latest_version(&self, source: &ModSource) -> Result<ModVersion>;
-    async fn get_dependencies(&self, source: &ModSource, version: &ModVersion) -> Result<Vec<Dependency>>;
+    async fn get_mod(&self, mod_id: &str) -> Result<ModInfo>;
+    async fn get_versions(&self, mod_id: &str, filters: &VersionFilters) -> Result<Vec<ModVersion>>;
+    async fn get_dependencies(&self, mod_id: &str, version_id: &str) -> Result<Vec<SourceDependency>>;
 }
 ```
+
+### Provider Enum
+
+`Provider` is a closed enum with manual dispatch via the `dispatch!` macro, instead of `dyn ModSourceProvider`:
+
+```rust
+pub enum Provider {
+    Modrinth(ModrinthSource),
+    CurseForge(CurseForgeSource),
+    Url(UrlSource),
+}
+```
+
+The `Provider` enum adds `get_latest_version()` which is not on the trait — it fetches all versions and picks the one with the most recent release date.
 
 ### Provider Implementations
 
@@ -39,7 +53,7 @@ pub trait ModSourceProvider: Send + Sync {
 
 ### Source Registry
 
-`SourceRegistry` maps `SourceKey` enum variants to `Arc<dyn ModSourceProvider>` instances. Built once during `AppContext::init()` from the global config.
+`SourceRegistry` maps `SourceKey` enum variants to `Provider` instances. Built once during `AppContext::init()` from the global config.
 
 ---
 
@@ -107,8 +121,8 @@ Finds the primary JAR asset from release assets (filters by `.jar` extension, pr
 
 ### Shared Infrastructure
 
-- **`api/retry.rs`**: Exponential backoff with `Retry-After` header support, max 3 retries
-- **`api/installer.rs`**: Shared Forge/NeoForge installer logic (extract profile, download libs, run processors)
+- **`api/retry.rs`**: Exponential backoff with `Retry-After` header support. Separate configs for general API calls (`API_RETRY_CONFIG`, max 3 retries) and auth flow calls (`AUTH_RETRY_CONFIG`, max 3 retries). `send_retried_request()` for API calls, separate auth retry via `send_retried_request` with auth config.
+- **`api/installer/`**: Directory with 5 files: `mod.rs`, `libraries.rs`, `processors.rs`, `profile.rs`, `templates.rs`. Shared Forge/NeoForge installer logic.
 
 ---
 
@@ -120,7 +134,7 @@ BFS-based resolver that traverses the dependency graph starting from a root mod.
 
 ### Download Manager (`services/download.rs`)
 
-Finds mods without cached JARs and downloads them concurrently using a tokio semaphore (8 concurrent tasks). Includes hash verification and retry logic. Returns a `DownloadSummary` with success/failure counts.
+Finds mods without cached JARs and downloads them concurrently using a tokio semaphore (default 8 concurrent tasks, configurable via `max_concurrent_downloads`). Includes hash verification and retry logic. Returns a `DownloadSummary` with success/failure counts.
 
 ---
 

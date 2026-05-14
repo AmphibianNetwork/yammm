@@ -23,7 +23,7 @@ fn epoch_secs() -> u64 {
 }
 
 /// Persisted Minecraft auth token.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuthToken {
 	pub access_token: String,
 	pub refresh_token: String,
@@ -32,9 +32,25 @@ pub struct AuthToken {
 	pub expires_at: u64,
 }
 
+impl std::fmt::Debug for AuthToken {
+	fn fmt(
+		&self,
+		f: &mut std::fmt::Formatter<'_>,
+	) -> std::fmt::Result {
+		f.debug_struct("AuthToken")
+			.field("access_token", &"[REDACTED]")
+			.field("refresh_token", &"[REDACTED]")
+			.field("username", &self.username)
+			.field("uuid", &self.uuid)
+			.field("expires_at", &self.expires_at)
+			.finish()
+	}
+}
+
 impl AuthToken {
 	pub fn is_expired(&self) -> bool {
-		epoch_secs() >= self.expires_at
+		const EXPIRY_BUFFER_SECS: u64 = 60;
+		epoch_secs() + EXPIRY_BUFFER_SECS >= self.expires_at
 	}
 }
 

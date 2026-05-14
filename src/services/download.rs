@@ -3,7 +3,7 @@
 //! - `download_jar`: single JAR with retry + hash check
 //! - `download_missing_mods`: batch-download with concurrency semaphore
 
-use crate::api::retry::{retry_request, RetryConfig};
+use crate::api::retry::{RetryConfig, retry_request};
 use crate::output;
 use crate::storage::JarCache;
 use anyhow::{Context, Result};
@@ -129,7 +129,10 @@ async fn download_once(
 		tracing::warn!("No hash provided for {}, skipping verification", name);
 	}
 
-	cache.write_bytes(hash_type, &computed, &bytes, &name)
+	tokio::task::spawn_blocking(move || {
+		cache.write_bytes(hash_type, &computed, &bytes, &name)
+	})
+	.await?
 }
 
 /// Batch-download all mod JARs not yet in the cache.

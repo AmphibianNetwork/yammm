@@ -1,9 +1,10 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{
-	disable_raw_mode, enable_raw_mode, EnterAlternateScreen,
-	LeaveAlternateScreen,
+	EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+	enable_raw_mode,
 };
+use ratatui::Frame;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -11,14 +12,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{
 	Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
 };
-use ratatui::Frame;
 use std::io;
 
 #[cfg(feature = "syntax-highlight")]
 use syntect::highlighting::{FontStyle, Highlighter};
 
 use super::app::{Mode, OrganizeApp};
-use super::{assign_config, OrganizeResult, OrphanConfig, Side};
+use super::{OrganizeResult, OrphanConfig, Side, assign_config};
 
 pub fn run_tui(
 	orphan_configs: &[OrphanConfig],
@@ -59,14 +59,12 @@ fn run_app(
 	loop {
 		terminal.draw(|f| draw(f, app))?;
 
-		if event::poll(std::time::Duration::from_millis(100))? {
-			if let Event::Key(key) = event::read()? {
-				if key.kind == KeyEventKind::Press
-					&& !handle_key(app, key, root_dir)?
-				{
-					return Ok(());
-				}
-			}
+		if event::poll(std::time::Duration::from_millis(100))?
+			&& let Event::Key(key) = event::read()?
+			&& key.kind == KeyEventKind::Press
+			&& !handle_key(app, key, root_dir)?
+		{
+			return Ok(());
 		}
 	}
 }
@@ -76,6 +74,17 @@ fn handle_key(
 	key: crossterm::event::KeyEvent,
 	root_dir: &std::path::Path,
 ) -> Result<bool> {
+	if key.code == KeyCode::F(1) {
+		app.show_help = !app.show_help;
+		return Ok(true);
+	}
+	if app.show_help {
+		if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+			app.show_help = false;
+		}
+		return Ok(true);
+	}
+
 	match app.mode {
 		Mode::ModSelect => match key.code {
 			KeyCode::Char('q') => {
@@ -202,6 +211,10 @@ fn draw(
 
 	if app.mode == Mode::DestSelect {
 		draw_dest_popup(f, app);
+	}
+
+	if app.show_help {
+		draw_help_overlay(f, app);
 	}
 }
 
@@ -421,14 +434,125 @@ fn draw_footer(
 ) {
 	let help = match app.mode {
 		Mode::ModSelect => {
-			"↑↓ navigate │ Enter: select mod │ Esc: skip │ q: quit"
+			"F1: help │ ↑↓ navigate │ Enter: select mod │ Esc: skip │ q: quit"
 		}
-		Mode::DestSelect => "↑↓ navigate │ Enter: confirm │ Esc: back",
+		Mode::DestSelect => {
+			"F1: help │ ↑↓ navigate │ Enter: confirm │ Esc: back"
+		}
 	};
 
 	let style = Style::default().fg(Color::DarkGray);
 	let paragraph = Paragraph::new(Span::styled(help, style));
 	f.render_widget(paragraph, area);
+}
+
+fn draw_help_overlay(
+	f: &mut Frame,
+	app: &OrganizeApp,
+) {
+	let key_style = Style::default()
+		.fg(Color::Yellow)
+		.add_modifier(Modifier::BOLD);
+	let desc_style = Style::default().fg(Color::White);
+	let dim_style = Style::default().fg(Color::DarkGray);
+	let section_style = Style::default()
+		.fg(Color::Cyan)
+		.add_modifier(Modifier::BOLD);
+
+	let mut lines = Vec::new();
+
+	match app.mode {
+		Mode::ModSelect => {
+			lines.push(Line::from(Span::styled("Mod Select", section_style)));
+			lines.push(key_value_line(
+				"Up/Down",
+				"Navigate filtered list",
+				key_style,
+				desc_style,
+			));
+			lines.push(key_value_line(
+				"Enter",
+				"Select mod",
+				key_style,
+				desc_style,
+			));
+			lines.push(key_value_line(
+				"Esc",
+				"Skip config",
+				key_style,
+				desc_style,
+			));
+			lines.push(key_value_line(
+				"q",
+				"Quit (when search empty)",
+				key_style,
+				desc_style,
+			));
+			lines.push(key_value_line(
+				"type",
+				"Filter mods by name",
+				key_style,
+				dim_style,
+			));
+			lines.push(key_value_line(
+				"Backspace",
+				"Delete search char",
+				key_style,
+				desc_style,
+			));
+		}
+		Mode::DestSelect => {
+			lines.push(Line::from(Span::styled(
+				"Destination Select",
+				section_style,
+			)));
+			lines.push(key_value_line(
+				"Up/Down",
+				"Navigate options",
+				key_style,
+				desc_style,
+			));
+			lines.push(key_value_line(
+				"Enter",
+				"Confirm assignment",
+				key_style,
+				desc_style,
+			));
+			lines.push(key_value_line("Esc", "Back", key_style, desc_style));
+		}
+	}
+
+	lines.push(Line::raw(""));
+	lines.push(Line::from(Span::styled(
+		"Press Esc or Enter to close",
+		dim_style,
+	)));
+
+	let overlay_height =
+		(lines.len() as u16 + 2).min(f.area().height.saturating_sub(4));
+	let area = centered_rect(60, overlay_height, f.area());
+	f.render_widget(Clear, area);
+
+	let paragraph = Paragraph::new(lines).block(
+		Block::default()
+			.title(Span::styled(" Keybindings ", section_style))
+			.borders(Borders::ALL)
+			.border_style(Style::default().fg(Color::Cyan)),
+	);
+
+	f.render_widget(paragraph, area);
+}
+
+fn key_value_line<'a>(
+	key: &'a str,
+	desc: &'a str,
+	key_style: Style,
+	desc_style: Style,
+) -> Line<'a> {
+	Line::from(vec![
+		Span::styled(format!("  {:<18}", key), key_style),
+		Span::styled(desc, desc_style),
+	])
 }
 
 fn draw_dest_popup(

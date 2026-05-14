@@ -37,29 +37,29 @@ yammm export -f mrpack
 
 ### Pre-built Binaries (Recommended)
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/Conquerix/yammm/releases).
+Download the latest release for your platform from [GitHub Releases](https://github.com/AmphibianNetwork/yammm/releases).
 
 #### One-liner Install (Linux/macOS)
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Conquerix/yammm/releases/latest/download/yammm-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AmphibianNetwork/yammm/releases/latest/download/yammm-installer.sh | sh
 ```
 
 #### One-liner Install (Windows PowerShell)
 
 ```powershell
-irm https://github.com/Conquerix/yammm/releases/latest/download/yammm-installer.ps1 | iex
+irm https://github.com/AmphibianNetwork/yammm/releases/latest/download/yammm-installer.ps1 | iex
 ```
 
 #### Homebrew (macOS/Linux)
 
 ```bash
-brew install conquerix/tap/yammm
+brew install AmphibianNetwork/tap/yammm
 ```
 
 #### Windows MSI
 
-Download the `.msi` installer from the [latest release](https://github.com/Conquerix/yammm/releases) — it adds `yammm` to your PATH automatically.
+Download the `.msi` installer from the [latest release](https://github.com/AmphibianNetwork/yammm/releases) — it adds `yammm` to your PATH automatically.
 
 #### Linux Packages
 
@@ -82,8 +82,8 @@ cargo install --path .
 ### With Nix
 
 ```bash
-nix profile install github:Conquerix/yammm    # Install directly
-nix run github:Conquerix/yammm                 # Run without installing
+nix profile install github:AmphibianNetwork/yammm    # Install directly
+nix run github:AmphibianNetwork/yammm                 # Run without installing
 nix develop                                    # Enter dev shell (from repo)
 nix build                                      # Build release binary (from repo)
 ```

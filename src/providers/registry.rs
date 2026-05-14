@@ -51,13 +51,26 @@ impl SourceRegistry {
 			SourceKey::Modrinth,
 			Provider::Modrinth(ModrinthSource::new(http_client.clone())),
 		);
-		providers.insert(
-			SourceKey::CurseForge,
-			Provider::CurseForge(CurseForgeSource::new(
-				config.api_keys.curseforge.clone(),
-				http_client.clone(),
-			)),
-		);
+
+		let cf_key = config
+			.api_keys
+			.curseforge
+			.clone()
+			.or_else(|| std::env::var("CURSEFORGE_API_TOKEN").ok());
+		if cf_key.is_some() {
+			providers.insert(
+				SourceKey::CurseForge,
+				Provider::CurseForge(CurseForgeSource::new(
+					cf_key,
+					http_client.clone(),
+				)),
+			);
+		} else {
+			tracing::debug!(
+				"No CurseForge API key configured — CurseForge source disabled"
+			);
+		}
+
 		providers.insert(
 			SourceKey::Url,
 			Provider::Url(UrlSource::with_http_client(http_client.clone())),

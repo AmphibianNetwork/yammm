@@ -1,3 +1,4 @@
+use crate::services::{cleanup_stale_deps, find_reverse_deps};
 use crate::storage::Storage;
 use crate::types::{DependencyKind, ModSource, ProjectType, TrackedMod};
 use crate::utils::slugify;
@@ -48,6 +49,7 @@ fn build_dep_tree_recursive(
 		.as_ref()
 		.map(|m| m.version.clone())
 		.unwrap_or_default();
+	let installed = tracked.is_some();
 
 	let deps = tracked
 		.as_ref()
@@ -82,38 +84,38 @@ fn build_dep_tree_recursive(
 		name,
 		version,
 		kind,
+		installed,
+		source: source.clone(),
 		children,
-		expanded: true,
 	}]
 }
 
-pub fn find_reverse_deps(
+pub fn find_reverse_dependents(
 	storage: &Storage,
 	target_slug: &str,
 	target_source: &ModSource,
 ) -> Vec<(String, String)> {
-	let mut dependents = Vec::new();
-	let all_items = storage.list_all().unwrap_or_default();
+	find_reverse_deps(storage, target_slug, target_source)
+}
 
-	for other_mod in all_items {
-		if other_mod.id == target_slug {
-			continue;
-		}
-
-		for dep in &other_mod.dependencies {
-			let dep_slug = slugify(&dep.mod_id);
-			let matches_slug =
-				dep_slug == target_slug || dep.mod_id == target_slug;
-			let matches_source =
-				dep.source.source_id() == target_source.source_id();
-			if matches_slug || matches_source {
-				dependents.push((other_mod.id.clone(), other_mod.name.clone()));
-				break;
-			}
-		}
+pub fn flatten_dep_tree(
+	tree: &[super::app::DepNode],
+	indent: usize,
+) -> Vec<super::app::DepEntry> {
+	let mut entries = Vec::new();
+	for node in tree {
+		entries.push(super::app::DepEntry {
+			mod_id: node.mod_id.clone(),
+			name: node.name.clone(),
+			version: node.version.clone(),
+			kind: node.kind,
+			installed: node.installed,
+			source: node.source.clone(),
+			indent,
+		});
+		entries.extend(flatten_dep_tree(&node.children, indent + 1));
 	}
-
-	dependents
+	entries
 }
 
 pub fn cleanup_stale_deps_after_remove(
@@ -121,22 +123,8 @@ pub fn cleanup_stale_deps_after_remove(
 	removed_slug: &str,
 	removed_source: &ModSource,
 ) {
-	for project_type in ProjectType::VARIANTS {
-		for mut mod_ron in
-			storage.store_for(*project_type).list().unwrap_or_default()
-		{
-			let before_len = mod_ron.dependencies.len();
-			mod_ron.dependencies.retain(|d| {
-				let slug_match = slugify(&d.mod_id) != removed_slug
-					&& d.mod_id != removed_slug;
-				let source_match =
-					d.source.source_id() != removed_source.source_id();
-				slug_match && source_match
-			});
-			if mod_ron.dependencies.len() < before_len {
-				let _ = storage.save(*project_type, &mod_ron.id, &mod_ron);
-			}
-		}
+	if let Err(e) = cleanup_stale_deps(storage, removed_slug, removed_source) {
+		tracing::warn!("Failed to cleanup stale deps: {e}");
 	}
 }
 
@@ -146,13 +134,16 @@ fn find_mod_by_source(
 	source: &ModSource,
 ) -> Option<TrackedMod> {
 	for pt in ProjectType::VARIANTS {
-		if let Ok(m) = storage.load(*pt, slug) {
+		if let Ok(m) = storage.load(*pt, slug)
+			&& m.source == *source
+		{
 			return Some(m);
 		}
 	}
-	if let Ok((_, m)) = storage.find_any(slug) {
+	if let Ok((_, m)) = storage.find_any(slug)
+		&& m.source == *source
+	{
 		return Some(m);
 	}
-	let _ = source;
 	None
 }

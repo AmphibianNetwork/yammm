@@ -15,7 +15,8 @@ use std::sync::Arc;
 use crate::api::GitHubClient;
 use crate::providers::provider::{ModSourceProvider, SearchFilters};
 use crate::types::{
-	HashType, ModInfo, ModSource, ModVersion, SourceDependency, VersionFilters,
+	HashType, ModEnv, ModInfo, ModSource, ModVersion, SourceDependency,
+	VersionFilters,
 };
 use crate::utils::{slugify, system_time_to_date, today_iso8601};
 use anyhow::Result;
@@ -68,14 +69,19 @@ impl ModSourceProvider for UrlSource {
 		false
 	}
 
+	fn get_mod_env(
+		&self,
+		_mod_info: &ModInfo,
+	) -> ModEnv {
+		ModEnv::Both
+	}
+
 	async fn search(
 		&self,
 		_query: &str,
 		_filters: &SearchFilters,
 	) -> Result<Vec<ModInfo>> {
-		Err(crate::errors::YammmError::invalid_args(
-			"URL source does not support search. Use modrinth or curseforge sources for searching.",
-		).into())
+		Ok(Vec::new())
 	}
 
 	async fn get_mod(
@@ -138,7 +144,7 @@ impl UrlSource {
 					"No releases found for {}",
 					mod_id
 				))
-				.into())
+				.into());
 			}
 		};
 
@@ -352,12 +358,16 @@ mod tests {
 
 	#[test]
 	fn test_parse_github_owner_repo_not_github() {
-		assert!(parse_github_owner_repo("https://example.com/mod.jar").is_none())
+		assert!(
+			parse_github_owner_repo("https://example.com/mod.jar").is_none()
+		)
 	}
 
 	#[test]
 	fn test_parse_github_owner_repo_incomplete() {
-		assert!(parse_github_owner_repo("https://github.com/FabricMC").is_none())
+		assert!(
+			parse_github_owner_repo("https://github.com/FabricMC").is_none()
+		)
 	}
 
 	#[test]
@@ -396,5 +406,32 @@ mod tests {
 		let source = UrlSource::with_http_client(reqwest::Client::new());
 		assert_eq!(source.name(), "url");
 		assert!(!source.supports_search());
+	}
+
+	#[test]
+	fn test_classify_url_github() {
+		match classify_url("https://github.com/user/repo") {
+			UrlKind::GitHub { owner, repo } => {
+				assert_eq!(owner, "user");
+				assert_eq!(repo, "repo");
+			}
+			_ => panic!("Expected GitHub"),
+		}
+	}
+
+	#[test]
+	fn test_classify_url_file() {
+		assert!(matches!(
+			classify_url("file:///path/to/mod.jar"),
+			UrlKind::File
+		));
+	}
+
+	#[test]
+	fn test_classify_url_http() {
+		assert!(matches!(
+			classify_url("https://example.com/mod.jar"),
+			UrlKind::Http
+		));
 	}
 }

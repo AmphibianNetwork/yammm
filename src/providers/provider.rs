@@ -8,7 +8,9 @@
 use crate::providers::curseforge::CurseForgeSource;
 use crate::providers::modrinth::ModrinthSource;
 use crate::providers::url::UrlSource;
-use crate::types::{ModInfo, ModVersion, SourceDependency, VersionFilters};
+use crate::types::{
+	ModEnv, ModInfo, ModVersion, SourceDependency, VersionFilters,
+};
 use anyhow::Result;
 
 /// Filters used when searching for mods.
@@ -32,6 +34,10 @@ impl SearchFilters {
 pub trait ModSourceProvider {
 	fn name(&self) -> &str;
 	fn supports_search(&self) -> bool;
+	fn get_mod_env(
+		&self,
+		mod_info: &ModInfo,
+	) -> ModEnv;
 	async fn search(
 		&self,
 		query: &str,
@@ -95,6 +101,13 @@ impl Provider {
 
 	pub fn supports_search(&self) -> bool {
 		dispatch!(self, supports_search())
+	}
+
+	pub fn get_mod_env(
+		&self,
+		mod_info: &ModInfo,
+	) -> ModEnv {
+		dispatch!(self, get_mod_env(mod_info))
 	}
 
 	pub async fn search(

@@ -5,7 +5,13 @@ members = ["cargo:."]
 cargo-dist-version = "0.31.0"
 ci = "github"
 installers = ["shell", "powershell", "homebrew", "msi"]
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+archive-format = "tar.gz"
 
 merge-tasks = true
 install-success-msg = "yammm is installed! Run 'yammm --help' to get started."
@@ -20,7 +26,7 @@ libwayland-dev = { stage = ["build", "run"] }
 libxkbcommon-dev = { stage = ["build", "run"] }
 
 [dist.homebrew]
-tap = "Conquerix/homebrew-tap"
+tap = "AmphibianNetwork/homebrew-tap"
 
 [dist.msi]
 upgrade-code = "E9C1B8D0-3A7F-4D2E-B5C6-8F0A1E2D3B4C"

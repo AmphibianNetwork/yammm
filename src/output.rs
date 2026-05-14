@@ -6,13 +6,38 @@
 use console::Style;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::services::download::DownloadSummary;
 use crate::types::{DependencyKind, ModSource};
 use comfy_table::{
-	modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, Color as TColor,
-	ContentArrangement, Table,
+	Color as TColor, ContentArrangement, Table, modifiers::UTF8_ROUND_CORNERS,
+	presets::UTF8_FULL,
 };
+
+static OUTPUT_CAPTURED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+	static CAPTURED_LINES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub fn start_capture() {
+	OUTPUT_CAPTURED.store(true, Ordering::Relaxed);
+	CAPTURED_LINES.with(|lines| lines.borrow_mut().clear());
+}
+
+pub fn stop_capture() -> Vec<String> {
+	OUTPUT_CAPTURED.store(false, Ordering::Relaxed);
+	CAPTURED_LINES.with(|lines| lines.borrow_mut().drain(..).collect())
+}
+
+fn is_captured() -> bool {
+	OUTPUT_CAPTURED.load(Ordering::Relaxed)
+}
+
+fn capture_line(line: String) {
+	CAPTURED_LINES.with(|lines| lines.borrow_mut().push(line));
+}
 
 static SUCCESS_CHECK: LazyLock<console::StyledObject<&str>> =
 	LazyLock::new(|| Style::new().green().bold().apply_to("✓"));
@@ -33,32 +58,60 @@ static INFO_STYLE: LazyLock<Style> = LazyLock::new(|| Style::new().cyan());
 static DIM_STYLE: LazyLock<Style> = LazyLock::new(|| Style::new().dim());
 static BOLD_STYLE: LazyLock<Style> = LazyLock::new(|| Style::new().bold());
 
+/// Emit a styled line to stdout, or capture it if output capture is active.
+macro_rules! emit {
+	(stdout $line:expr, $styled:expr) => {
+		if is_captured() {
+			capture_line($line);
+			return;
+		}
+		println!("{}", $styled);
+	};
+	(stderr $line:expr, $styled:expr) => {
+		if is_captured() {
+			capture_line($line);
+			return;
+		}
+		eprintln!("{}", $styled);
+	};
+}
+
 pub fn success(msg: impl std::fmt::Display) {
-	println!("{} {}", *SUCCESS_CHECK, msg);
+	let line = format!("{} {}", *SUCCESS_CHECK, msg);
+	emit!(stdout line, line);
 }
 
 pub fn error(msg: impl std::fmt::Display) {
-	eprintln!("{} {}", *ERROR_CROSS, msg);
+	let line = format!("{} {}", *ERROR_CROSS, msg);
+	emit!(stderr line, line);
 }
 
 pub fn warning(msg: impl std::fmt::Display) {
-	eprintln!("{} {}", *WARN_SYMBOL, msg);
+	let line = format!("{} {}", *WARN_SYMBOL, msg);
+	emit!(stderr line, line);
 }
 
 pub fn heading(msg: impl std::fmt::Display) {
-	println!("{}", HEADING_STYLE.apply_to(msg));
+	let line = format!("{}", msg);
+	emit!(stdout line, HEADING_STYLE.apply_to(msg));
 }
 
 pub fn info(msg: impl std::fmt::Display) {
-	println!("{}", INFO_STYLE.apply_to(msg));
+	let line = format!("{}", msg);
+	emit!(stdout line, INFO_STYLE.apply_to(msg));
 }
 
 pub fn dim(msg: impl std::fmt::Display) {
-	println!("{}", DIM_STYLE.apply_to(msg));
+	let line = format!("{}", msg);
+	emit!(stdout line, DIM_STYLE.apply_to(msg));
 }
 
 /// Prints an empty line.
 pub fn blank_line() {
+	if is_captured() {
+		capture_line(String::new());
+		return;
+	}
 	println!();
 }
 
@@ -66,11 +119,13 @@ pub fn styled(
 	msg: impl std::fmt::Display,
 	style: Style,
 ) {
-	println!("{}", style.apply_to(msg));
+	let line = format!("{}", msg);
+	emit!(stdout line, style.apply_to(msg));
 }
 
 pub fn bullet(msg: impl std::fmt::Display) {
-	println!("{} {}", *BULLET_POINT, msg);
+	let line = format!("{} {}", *BULLET_POINT, msg);
+	emit!(stdout line, line);
 }
 
 fn print_item(
@@ -79,9 +134,10 @@ fn print_item(
 	version: &str,
 	source: &str,
 ) {
+	let line = format!("  {} {} v{} [{}]", icon, name, version, source);
 	let ver = DIM_STYLE.apply_to(format!("v{}", version));
 	let src = Style::new().blue().apply_to(format!("[{}]", source));
-	println!("  {} {} {} {}", icon, BOLD_STYLE.apply_to(name), ver, src);
+	emit!(stdout line, format!("  {} {} {} {}", icon, BOLD_STYLE.apply_to(name), ver, src));
 }
 
 pub fn item_success(
@@ -125,6 +181,12 @@ pub fn version_arrow(
 
 /// Creates a progress bar for file downloads.
 pub fn download_progress(total: u64) -> ProgressBar {
+	if is_captured() {
+		capture_line(format!("Downloading 0/{}...", total));
+		let pb = ProgressBar::hidden();
+		pb.finish_and_clear();
+		return pb;
+	}
 	let pb = ProgressBar::new(total);
 	pb.set_style(
 		ProgressStyle::with_template(
@@ -138,6 +200,12 @@ pub fn download_progress(total: u64) -> ProgressBar {
 
 /// Creates a spinner for indeterminate progress.
 pub fn spinner(msg: &str) -> ProgressBar {
+	if is_captured() {
+		capture_line(format!("⠋ {}", msg));
+		let pb = ProgressBar::hidden();
+		pb.finish_and_clear();
+		return pb;
+	}
 	let pb = ProgressBar::new_spinner();
 	pb.set_style(
 		ProgressStyle::with_template("{spinner:.green} {msg}")

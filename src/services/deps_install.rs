@@ -1,11 +1,11 @@
 //! Shared dependency installation logic used by `add` and `import` commands.
 //!
 //! Provides categorization of resolved dependencies, presentation to the user,
-//! interactive prompting, and installation via the provider layer.
+//! interactive prompting, and installation via the service layer.
 
 use std::sync::Arc;
 
-use crate::commands::add::sources::AddContext;
+use super::mod_install::install_mod;
 use crate::output;
 use crate::providers::SourceRegistry;
 use crate::storage::Storage;
@@ -43,10 +43,10 @@ pub struct CategorizedDeps {
 }
 
 /// Context for installing resolved dependencies.
-pub struct DepInstallContext<'a> {
-	pub storage: &'a Storage,
+pub struct DepInstallContext {
+	pub storage: Arc<Storage>,
 	pub registry: Arc<SourceRegistry>,
-	pub mc_version: Option<&'a str>,
+	pub mc_version: Option<String>,
 	pub loader: Option<LoaderType>,
 }
 
@@ -60,10 +60,12 @@ pub fn categorize_deps(
 	root_mod_ids: &[String],
 	storage: &Storage,
 ) -> CategorizedDeps {
-	let mut missing_required = Vec::new();
-	let mut missing_optional = Vec::new();
+	let mut missing_required: Vec<DepInfo> = Vec::new();
+	let mut missing_optional: Vec<DepInfo> = Vec::new();
 	let mut dep_entries: Vec<Dependency> = Vec::new();
-	let mut incompatible_warnings = Vec::new();
+	let mut incompatible_warnings: Vec<String> = Vec::new();
+	let mut seen_dep_slugs: std::collections::HashSet<String> =
+		std::collections::HashSet::new();
 
 	for resolved in resolved_mods {
 		if root_mod_ids.contains(&resolved.mod_id) {
@@ -80,13 +82,45 @@ pub fn categorize_deps(
 				incompatible_warnings.push(format!(
 					"Incompatible mod '{}' is installed — this may cause conflicts with {}",
 					resolved.name.as_deref().unwrap_or(&resolved.mod_id),
-					resolved.required_by.as_deref().unwrap_or("the mod you are adding")
+					resolved
+						.required_by
+						.as_deref()
+						.unwrap_or("the mod you are adding")
 				));
 			}
 			continue;
 		}
 
 		let slug = slugify(&resolved.mod_id);
+
+		if seen_dep_slugs.contains(&slug) {
+			if let Some(existing) =
+				dep_entries.iter_mut().find(|d| d.mod_id == slug)
+			{
+				append_required_by(
+					&mut existing.required_by,
+					&resolved.required_by,
+				);
+			}
+			let target = if resolved.dependency_type.is_required() {
+				&mut missing_required
+			} else {
+				&mut missing_optional
+			};
+			if let Some(list) = target.iter_mut().find(|d| {
+				slugify(&d.name) == slug
+					|| d.identifier.ends_with(&format!(":{}", slug))
+			}) {
+				append_required_by(
+					&mut list.required_by,
+					&resolved.required_by,
+				);
+			}
+			continue;
+		}
+
+		seen_dep_slugs.insert(slug.clone());
+
 		let dep = Dependency::new(
 			slug.clone(),
 			resolved.source.clone(),
@@ -109,11 +143,7 @@ pub fn categorize_deps(
 		}
 
 		let dep_info = DepInfo {
-			identifier: format!(
-				"{}:{}",
-				resolved.source.as_str(),
-				resolved.source.source_id()
-			),
+			identifier: format!("{}:{}", resolved.source.as_str(), slug),
 			name: resolved.name.unwrap_or_else(|| resolved.mod_id.clone()),
 			description: resolved
 				.description
@@ -141,40 +171,45 @@ pub fn categorize_deps(
 	}
 }
 
+fn append_required_by(
+	field: &mut Option<String>,
+	new_parent: &Option<String>,
+) {
+	if let Some(parent) = new_parent
+		&& !field.as_ref().is_some_and(|p| p.contains(parent))
+	{
+		let updated = format!("{}, {}", field.as_deref().unwrap_or(""), parent);
+		*field = Some(updated);
+	}
+}
+
 pub fn present_incompatible_warnings(warnings: &[String]) {
 	for warning in warnings {
 		output::warning(warning);
 	}
 }
 
-pub fn present_dep_list(
-	heading: &str,
-	deps: &[DepInfo],
-) {
-	output::blank_line();
-	output::heading(format!("{} ({})", heading, deps.len()));
-	for dep in deps {
-		let ver = dep.version.as_deref().unwrap_or("latest");
-		if let Some(ref parent) = dep.required_by {
-			output::bullet(format!(
-				"{} v{} (via {})",
-				console::Style::new().bold().apply_to(&dep.name),
-				console::Style::new().dim().apply_to(ver),
-				parent
-			));
-		} else {
-			output::bullet(format!(
-				"{} v{}",
-				console::Style::new().bold().apply_to(&dep.name),
-				console::Style::new().dim().apply_to(ver)
-			));
-		}
-		if !dep.description.is_empty() {
-			output::dim(format!("      {}", dep.description));
-		}
-		if !dep.url.is_empty() {
-			output::dim(format!("      {}", dep.url));
-		}
+pub fn present_dep(dep: &DepInfo) {
+	let ver = dep.version.as_deref().unwrap_or("latest");
+	if let Some(ref parent) = dep.required_by {
+		output::bullet(format!(
+			"{} v{} (via {})",
+			console::Style::new().bold().apply_to(&dep.name),
+			console::Style::new().dim().apply_to(ver),
+			parent
+		));
+	} else {
+		output::bullet(format!(
+			"{} v{}",
+			console::Style::new().bold().apply_to(&dep.name),
+			console::Style::new().dim().apply_to(ver)
+		));
+	}
+	if !dep.description.is_empty() {
+		output::dim(format!("      {}", dep.description));
+	}
+	if !dep.url.is_empty() {
+		output::dim(format!("      {}", dep.url));
 	}
 }
 
@@ -184,57 +219,139 @@ pub async fn prompt_and_install_deps(
 	default_confirm: bool,
 	yes: bool,
 	force: bool,
-	ctx: &DepInstallContext<'_>,
-) -> anyhow::Result<()> {
-	present_dep_list(heading, deps);
-
-	let auto_answer = yes && default_confirm;
-	let should_add = if auto_answer {
-		true
-	} else if yes && !default_confirm {
-		false
-	} else {
-		dialoguer::Confirm::new()
-			.with_prompt(format!(
-				"Download and add {}?",
-				heading.to_lowercase()
-			))
-			.default(default_confirm)
-			.interact()?
-	};
-
-	if should_add {
-		install_deps(deps, force, ctx).await?;
+	ctx: &DepInstallContext,
+) -> anyhow::Result<Vec<DepInfo>> {
+	if deps.is_empty() {
+		return Ok(Vec::new());
 	}
 
-	Ok(())
+	output::blank_line();
+	output::heading(heading);
+
+	let auto_answer = yes && default_confirm;
+	let mut accepted: Vec<DepInfo> = Vec::new();
+
+	for dep in deps {
+		present_dep(dep);
+
+		let should_add = if auto_answer {
+			true
+		} else if yes && !default_confirm {
+			false
+		} else {
+			dialoguer::Confirm::new()
+				.with_prompt(format!("Install {}?", dep.name))
+				.default(default_confirm)
+				.interact()?
+		};
+
+		if should_add {
+			accepted.push(dep.clone());
+		}
+	}
+
+	if !accepted.is_empty() {
+		install_deps(&accepted, force, ctx).await?;
+	}
+
+	Ok(accepted)
 }
 
 pub async fn install_deps(
 	deps: &[DepInfo],
 	force: bool,
-	ctx: &DepInstallContext<'_>,
+	ctx: &DepInstallContext,
 ) -> anyhow::Result<()> {
-	for dep in deps {
-		let ver = dep.version.as_deref();
-		let dep_mod_source = dep
-			.identifier
-			.parse::<ModSource>()
-			.unwrap_or_else(|_| ModSource::modrinth(&dep.identifier));
-		let add_ctx = AddContext {
-			source: &dep_mod_source,
-			version_req: AddContext::parse_version(ver)?,
-			force,
-			storage: ctx.storage,
-			mc_version: ctx.mc_version,
-			loader: ctx.loader,
-			registry: ctx.registry.clone(),
-			env_override: None,
-			project_type_override: None,
-			categories: Vec::new(),
-		};
-		add_ctx.add(&dep.identifier).await?;
+	if deps.len() <= 1 {
+		for dep in deps {
+			install_single_dep(dep, force, ctx).await?;
+		}
+		return Ok(());
 	}
+
+	let sem = Arc::new(tokio::sync::Semaphore::new(8));
+	let mut tasks = tokio::task::JoinSet::new();
+
+	for dep in deps {
+		let dep = dep.clone();
+		let storage = ctx.storage.clone();
+		let registry = ctx.registry.clone();
+		let mc_version = ctx.mc_version.clone();
+		let loader = ctx.loader;
+		let permit = sem.clone().acquire_owned().await.map_err(|_| {
+			crate::errors::YammmError::general("semaphore closed")
+		})?;
+
+		tasks.spawn(async move {
+			let _permit = permit;
+			let dep_mod_source = dep
+				.identifier
+				.parse::<ModSource>()
+				.unwrap_or_else(|_| ModSource::modrinth(&dep.identifier));
+			let version_req = dep
+				.version
+				.as_deref()
+				.map(crate::types::VersionReq::parse)
+				.transpose()?;
+			install_mod(
+				&dep_mod_source,
+				version_req.as_ref(),
+				force,
+				&storage,
+				mc_version.as_deref(),
+				loader,
+				registry,
+			)
+			.await
+		});
+	}
+
+	let mut errors: Vec<anyhow::Error> = Vec::new();
+	while let Some(result) = tasks.join_next().await {
+		match result {
+			Ok(Ok(_)) => {}
+			Ok(Err(e)) => errors.push(e),
+			Err(e) => {
+				tracing::warn!("dep install task failed: {e}");
+				errors.push(
+					crate::errors::YammmError::general(format!(
+						"task failed: {e}"
+					))
+					.into(),
+				);
+			}
+		}
+	}
+
+	if let Some(first) = errors.into_iter().next() {
+		return Err(first);
+	}
+	Ok(())
+}
+
+async fn install_single_dep(
+	dep: &DepInfo,
+	force: bool,
+	ctx: &DepInstallContext,
+) -> anyhow::Result<()> {
+	let dep_mod_source = dep
+		.identifier
+		.parse::<ModSource>()
+		.unwrap_or_else(|_| ModSource::modrinth(&dep.identifier));
+	let version_req = match dep.version.as_deref() {
+		Some(v) => Some(crate::types::VersionReq::parse(v)?),
+		None => None,
+	};
+	install_mod(
+		&dep_mod_source,
+		version_req.as_ref(),
+		force,
+		&ctx.storage,
+		ctx.mc_version.as_deref(),
+		ctx.loader,
+		ctx.registry.clone(),
+	)
+	.await?;
 	Ok(())
 }
 

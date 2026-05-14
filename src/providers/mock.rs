@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::providers::provider::{ModSourceProvider, SearchFilters};
-use crate::types::{ModInfo, ModVersion, SourceDependency, VersionFilters};
+use crate::types::{
+	ModEnv, ModInfo, ModVersion, SourceDependency, VersionFilters,
+};
 use anyhow::Result;
 
 #[derive(Clone, Default, Debug)]
@@ -61,6 +63,13 @@ impl ModSourceProvider for MockSource {
 
 	fn supports_search(&self) -> bool {
 		false
+	}
+
+	fn get_mod_env(
+		&self,
+		_mod_info: &ModInfo,
+	) -> ModEnv {
+		ModEnv::Both
 	}
 
 	async fn search(

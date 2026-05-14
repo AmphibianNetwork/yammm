@@ -81,6 +81,11 @@ pub async fn download_profile_libraries(
 						}
 						std::fs::write(&dest, &bytes)?;
 						paths.push(dest);
+					} else {
+						tracing::warn!(
+							"Failed to read response body for {}",
+							artifact.path
+						);
 					}
 				}
 				Ok(resp) => {
@@ -120,6 +125,11 @@ pub async fn download_profile_libraries(
 					if let Ok(bytes) = resp.bytes().await {
 						std::fs::write(&dest, &bytes)?;
 						paths.push(dest);
+					} else {
+						tracing::warn!(
+							"Failed to read response body for maven lib {}",
+							relative
+						);
 					}
 				}
 				Ok(resp) => {
@@ -161,70 +171,22 @@ pub(crate) async fn collect_version_libs(
 	for lib in version_libs {
 		let name = lib.get("name").and_then(|n| n.as_str());
 		if let Some(downloads) = lib.get("downloads") {
-			if let Some(artifact) = downloads.get("artifact") {
-				if let Some(path_str) =
+			if let Some(artifact) = downloads.get("artifact")
+				&& let Some(path_str) =
 					artifact.get("path").and_then(|p| p.as_str())
+			{
+				let lib_path = lib_dir.join(path_str);
+				if !lib_path.exists()
+					&& let Some(url) =
+						artifact.get("url").and_then(|u| u.as_str())
+					&& !url.is_empty()
 				{
-					let lib_path = lib_dir.join(path_str);
-					if !lib_path.exists() {
-						if let Some(url) =
-							artifact.get("url").and_then(|u| u.as_str())
-						{
-							if !url.is_empty() {
-								if let Some(parent) = lib_path.parent() {
-									std::fs::create_dir_all(parent)?;
-								}
-								match crate::api::retry::send_retried(
-									http_client,
-									url,
-									Vec::new(),
-								)
-								.await
-								{
-									Ok(resp) if resp.status().is_success() => {
-										if let Ok(bytes) = resp.bytes().await {
-											std::fs::write(&lib_path, &bytes)?;
-										}
-									}
-									Ok(resp) => {
-										failures.push(format!(
-											"{}: HTTP {}",
-											path_str,
-											resp.status()
-										));
-									}
-									Err(e) => {
-										failures.push(format!(
-											"{}: {}",
-											path_str, e
-										));
-									}
-								}
-							}
-						}
-					}
-					if lib_path.exists() {
-						jars.push(lib_path);
-					}
-				}
-			}
-		} else if let Some(maven_url) = lib.get("url").and_then(|u| u.as_str())
-		{
-			if let Some(lib_name) = name {
-				let relative = crate::utils::maven::coords_to_path(lib_name);
-				let lib_path = lib_dir.join(&relative);
-				if !lib_path.exists() {
 					if let Some(parent) = lib_path.parent() {
 						std::fs::create_dir_all(parent)?;
 					}
-					let download_url = format!(
-						"{}/{}",
-						maven_url.trim_end_matches('/'),
-						relative
-					);
 					match crate::api::retry::send_retried(
 						http_client,
-						&download_url,
+						url,
 						Vec::new(),
 					)
 					.await
@@ -232,17 +194,22 @@ pub(crate) async fn collect_version_libs(
 						Ok(resp) if resp.status().is_success() => {
 							if let Ok(bytes) = resp.bytes().await {
 								std::fs::write(&lib_path, &bytes)?;
+							} else {
+								tracing::warn!(
+									"Failed to read response body for {}",
+									path_str
+								);
 							}
 						}
 						Ok(resp) => {
 							failures.push(format!(
 								"{}: HTTP {}",
-								lib_name,
+								path_str,
 								resp.status()
 							));
 						}
 						Err(e) => {
-							failures.push(format!("{}: {}", lib_name, e));
+							failures.push(format!("{}: {}", path_str, e));
 						}
 					}
 				}
@@ -250,16 +217,61 @@ pub(crate) async fn collect_version_libs(
 					jars.push(lib_path);
 				}
 			}
+		} else if let Some(maven_url) = lib.get("url").and_then(|u| u.as_str())
+			&& let Some(lib_name) = name
+		{
+			let relative = crate::utils::maven::coords_to_path(lib_name);
+			let lib_path = lib_dir.join(&relative);
+			if !lib_path.exists() {
+				if let Some(parent) = lib_path.parent() {
+					std::fs::create_dir_all(parent)?;
+				}
+				let download_url =
+					format!("{}/{}", maven_url.trim_end_matches('/'), relative);
+				match crate::api::retry::send_retried(
+					http_client,
+					&download_url,
+					Vec::new(),
+				)
+				.await
+				{
+					Ok(resp) if resp.status().is_success() => {
+						if let Ok(bytes) = resp.bytes().await {
+							std::fs::write(&lib_path, &bytes)?;
+						} else {
+							tracing::warn!(
+								"Failed to read response body for {}",
+								lib_name
+							);
+						}
+					}
+					Ok(resp) => {
+						failures.push(format!(
+							"{}: HTTP {}",
+							lib_name,
+							resp.status()
+						));
+					}
+					Err(e) => {
+						failures.push(format!("{}: {}", lib_name, e));
+					}
+				}
+			}
+			if lib_path.exists() {
+				jars.push(lib_path);
+			}
 		}
 	}
-	if !failures.is_empty() {
-		tracing::warn!(
+	if failures.is_empty() {
+		Ok(jars)
+	} else {
+		Err(crate::errors::YammmError::download_failed(format!(
 			"Failed to download {} version lib(s): {}",
 			failures.len(),
 			failures.join(", ")
-		);
+		))
+		.into())
 	}
-	Ok(jars)
 }
 
 #[cfg(test)]

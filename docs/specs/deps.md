@@ -98,39 +98,36 @@ All required and optional dependencies are automatically added without prompting
 
 ## Dependency Tree Display
 
-`yammm info tree` displays the dependency tree as a flat list:
+`yammm info tree` displays the dependency tree using ASCII branch characters:
 
 ```
-create
-  requires: architectury-api, cloth-config
-  optional: create-enchantment-improvements
-
-architectury-api
-  requires: fabric-api
-
-cloth-config
-  requires: fabric-api
-
-fabric-api
-  (no dependencies)
+├── Create v0.5.1+m both [Modrinth]
+│   ├── architectury-api (required)
+│   └── cloth-config (optional)
+├── Sodium v0.6.0 both [Modrinth]
+│   └── fabric-api (required)
+└── Fabric API v0.92.0 both [Modrinth]
+    (no dependencies)
 ```
 
-```
+Each top-level entry shows: name, version, environment, and source. Dependencies are indented with branch lines showing their ID and dependency kind.
+
+---
 
 ## Dependency Storage
 
-Dependencies are stored in each mod's `mod.ron` file:
+Dependencies are stored in each mod's `entry.ron` file:
 
 ```ron
 dependencies: [
     (
         mod_id: "fabric-api",
-        source: Modrinth(id: "P7dR8mAK"),
+        source: (type: "modrinth", id: "P7dR8mAK"),
         kind: required,
     ),
     (
         mod_id: "cloth-config",
-        source: Modrinth(id: "9s6osm5g"),
+        source: (type: "modrinth", id: "9s6osm5g"),
         kind: optional,
     ),
 ],
@@ -138,10 +135,12 @@ dependencies: [
 
 Each dependency records:
 - `mod_id` — the slug/ID used in the profile
-- `source` — the upstream source reference
+- `source` — the upstream source reference (internally-tagged)
 - `kind` — required, optional, incompatible, or embedded
-- `version` — optional version constraint
+- `version` — optional version constraint (`VersionReq`)
 - `required_by` — which mod introduced this dependency
+
+Between the provider layer and the resolver, `SourceDependency` is used (with `version_id` and `dep_type` fields). The resolver converts these into stored `Dependency` structs.
 
 ---
 

@@ -98,8 +98,23 @@ impl DependencyResolver {
 				source: dep.source.clone(),
 			};
 
+			// Skip if already resolved (deduplicate across multiple parents).
+			// This must come before the cycle check — a mod that appears in
+			// ancestors but is already resolved is a shared dependency, not a
+			// cycle.  This also handles the case where Modrinth returns a dep
+			// using the raw project ID (e.g. "EwPIWPJ9") while the root was
+			// resolved with its slug (e.g. "dynamiccrosshair").
+			if resolved.contains(&key) {
+				continue;
+			}
+
 			// If this mod appears in the ancestor chain, we've got a cycle.
 			if entry.ancestors.contains(&key.to_string()) {
+				tracing::debug!(
+					"Cycle detected: {} appears in ancestors {:?}",
+					key,
+					entry.ancestors
+				);
 				return Err(crate::errors::YammmError::circular_dep(
 					key.to_string(),
 					format!("{} → ... → {}", mod_id, dep.mod_id),
@@ -107,14 +122,25 @@ impl DependencyResolver {
 				.into());
 			}
 
-			// Skip if already resolved (deduplicate across multiple parents).
-			if resolved.contains(&key) {
-				continue;
-			}
-
 			match self.resolve_mod(&dep).await {
 				Ok(resolved_mod) => {
+					let canonical_key = ModIdentity {
+						mod_id: resolved_mod.mod_id.clone(),
+						source: resolved_mod.source.clone(),
+					};
+
+					// If the canonical identity is already resolved, skip
+					// adding to results — the same mod was reached via a
+					// different source key (e.g. parent source inherited by
+					// a sourceless dep, or raw project ID vs slug).
+					if resolved.contains(&canonical_key) {
+						resolved.insert(key);
+						continue;
+					}
+
 					resolved.insert(key.clone());
+					resolved.insert(canonical_key.clone());
+
 					result.push(resolved_mod.clone());
 
 					// Embedded mods are bundled in the parent JAR — skip their deps.
@@ -123,16 +149,25 @@ impl DependencyResolver {
 						continue;
 					}
 
+					// Build ancestor set: parent's ancestors + parent key +
+					// canonical key (if different) so that deps referencing the
+					// same mod via raw ID vs slug are both caught.
+					let mut ancestors_for_children = entry.ancestors.clone();
+					ancestors_for_children.insert(key.to_string());
+					if canonical_key != key {
+						ancestors_for_children
+							.insert(canonical_key.to_string());
+					}
+
 					if let Err(e) = self
-						.queue_dependencies(
+						.queue_dependencies_with_ancestors(
 							&resolved_mod,
 							&mut queue,
-							&entry.ancestors,
-							&key,
+							&ancestors_for_children,
 						)
 						.await
 					{
-						tracing::warn!(
+						tracing::debug!(
 							"Could not fetch dependencies for {}: {}",
 							dep.mod_id,
 							e
@@ -141,7 +176,7 @@ impl DependencyResolver {
 				}
 				Err(e) => {
 					if dep.kind.is_required() {
-						tracing::warn!(
+						tracing::debug!(
 							"Required dependency resolution failed: {}",
 							e
 						);
@@ -159,14 +194,13 @@ impl DependencyResolver {
 		Ok(result)
 	}
 
-	/// Queue dependencies for a resolved mod.
+	/// Queue dependencies for a resolved mod using a pre-built ancestor set.
 	/// Optional parents downgrade children to optional.
-	async fn queue_dependencies(
+	async fn queue_dependencies_with_ancestors(
 		&self,
 		resolved: &ResolvedMod,
 		queue: &mut Vec<QueueEntry>,
-		parent_ancestors: &HashSet<String>,
-		parent_key: &ModIdentity,
+		ancestors: &HashSet<String>,
 	) -> Result<()> {
 		let provider = self.registry.get(&resolved.source)?;
 
@@ -184,7 +218,8 @@ impl DependencyResolver {
 						"Could not resolve version for {}",
 						resolved.mod_id
 					))?;
-				let version_id = match version.version_id {
+
+				match version.version_id {
 					Some(id) => id,
 					None => {
 						tracing::warn!(
@@ -193,8 +228,7 @@ impl DependencyResolver {
 						);
 						return Ok(());
 					}
-				};
-				version_id
+				}
 			}
 		};
 
@@ -203,13 +237,14 @@ impl DependencyResolver {
 			.await
 			.context("Failed to fetch dependencies")?;
 
-		// Build ancestor set for the next level: parent's ancestors + parent.
-		let mut new_ancestors = parent_ancestors.clone();
-		new_ancestors.insert(parent_key.to_string());
-
 		for dep in deps {
-			// A mod should not depend on itself.
-			if dep.mod_id == resolved.mod_id {
+			// A mod should not depend on itself.  Check both the canonical
+			// mod_id (slug) and the source's raw ID — Modrinth may return a
+			// dep using the project ID (e.g. "EwPIWPJ9") while the resolved
+			// mod uses the slug (e.g. "dynamiccrosshair").
+			if dep.mod_id == resolved.mod_id
+				|| dep.mod_id == resolved.source.source_id()
+			{
 				continue;
 			}
 
@@ -258,7 +293,7 @@ impl DependencyResolver {
 							.unwrap_or(resolved.mod_id.clone()),
 					),
 				},
-				ancestors: new_ancestors.clone(),
+				ancestors: ancestors.clone(),
 			});
 		}
 
@@ -280,6 +315,8 @@ impl DependencyResolver {
 			.await
 			.with_context(|| format!("Mod not found: {}", dep.mod_id))?;
 
+		let display_id = mod_info.id.clone();
+
 		let filters = VersionFilters {
 			minecraft_version: self.minecraft_version.clone(),
 			loader: self.loader,
@@ -289,7 +326,7 @@ impl DependencyResolver {
 			.get_latest_version(&dep.mod_id, &filters)
 			.await
 			.with_context(|| {
-				format!("No matching version for {}", dep.mod_id)
+				format!("No matching version for {}", display_id)
 			})?;
 
 		if let Some(ref req) = dep.version {
@@ -297,7 +334,7 @@ impl DependencyResolver {
 				.context("Invalid version string from provider")?;
 			if !req.satisfies(&ver) {
 				return Err(crate::errors::YammmError::version_conflict(
-					format!("No version of {} satisfies {}", dep.mod_id, req),
+					format!("No version of {} satisfies {}", display_id, req),
 				)
 				.into());
 			}
@@ -323,6 +360,7 @@ mod tests {
 	use crate::providers::mock::MockSource;
 	use crate::providers::registry::SourceRegistry;
 	use crate::test_util;
+	use crate::types::ModInfo;
 
 	fn setup_resolver() -> (DependencyResolver, MockSource) {
 		let mock = MockSource::new();
@@ -421,7 +459,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_circular_dependency_detection() {
+	async fn test_mutual_dependency_resolves() {
 		let (resolver, mock) = setup_resolver();
 
 		mock.add_mod("A", test_util::make_mod_info("A"));
@@ -441,17 +479,54 @@ mod tests {
 
 		let result = resolver.resolve("A", ModSource::modrinth("A")).await;
 
-		assert!(result.is_err());
-		let err = result.unwrap_err();
-		let yammm_err = err.downcast_ref::<crate::errors::YammmError>();
 		assert!(
-			matches!(
-				yammm_err,
-				Some(crate::errors::YammmError::CircularDependency { .. })
-			),
-			"expected CircularDependency error, got: {:?}",
-			yammm_err
+			result.is_ok(),
+			"mutual dependencies should resolve, not error: {:?}",
+			result
 		);
+		let mods = result.unwrap();
+		assert_eq!(mods.len(), 2, "A and B should both be resolved");
+
+		let a = mods.iter().find(|m| m.mod_id == "A").unwrap();
+		let b = mods.iter().find(|m| m.mod_id == "B").unwrap();
+		assert_eq!(a.dependency_type, DependencyKind::Required);
+		assert_eq!(b.dependency_type, DependencyKind::Required);
+	}
+
+	#[tokio::test]
+	async fn test_longer_mutual_dependency_resolves() {
+		let (resolver, mock) = setup_resolver();
+
+		mock.add_mod("A", test_util::make_mod_info("A"));
+		mock.add_mod("B", test_util::make_mod_info("B"));
+		mock.add_mod("C", test_util::make_mod_info("C"));
+
+		mock.add_versions("A", vec![test_util::make_version("1.0", "vid-a")]);
+		mock.add_versions("B", vec![test_util::make_version("1.0", "vid-b")]);
+		mock.add_versions("C", vec![test_util::make_version("1.0", "vid-c")]);
+
+		mock.add_deps(
+			"vid-a",
+			vec![test_util::make_dep("B", DependencyKind::Required)],
+		);
+		mock.add_deps(
+			"vid-b",
+			vec![test_util::make_dep("C", DependencyKind::Required)],
+		);
+		mock.add_deps(
+			"vid-c",
+			vec![test_util::make_dep("A", DependencyKind::Required)],
+		);
+
+		let result = resolver.resolve("A", ModSource::modrinth("A")).await;
+
+		assert!(
+			result.is_ok(),
+			"longer mutual dependencies should resolve, not error: {:?}",
+			result
+		);
+		let mods = result.unwrap();
+		assert_eq!(mods.len(), 3, "A, B, and C should all be resolved");
 	}
 
 	#[tokio::test]
@@ -525,6 +600,72 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn test_raw_project_id_deduplication() {
+		let (resolver, mock) = setup_resolver();
+
+		mock.add_mod("A", test_util::make_mod_info("A"));
+		mock.add_mod(
+			"EwPIWPJ9",
+			ModInfo {
+				id: "dynamiccrosshair".to_string(),
+				name: "Dynamic Crosshair".to_string(),
+				description: "Test mod".to_string(),
+				source: ModSource::modrinth("dynamiccrosshair"),
+				minecraft_versions: vec![],
+				loaders: vec![],
+				downloads: 0,
+				url: "https://modrinth.com/mod/dynamiccrosshair".to_string(),
+				project_type: None,
+				client_side: None,
+				server_side: None,
+			},
+		);
+
+		mock.add_versions("A", vec![test_util::make_version("1.0", "vid-a")]);
+		mock.add_versions(
+			"EwPIWPJ9",
+			vec![test_util::make_version("1.0", "vid-dc")],
+		);
+
+		mock.add_deps(
+			"vid-a",
+			vec![
+				test_util::make_dep_with_source(
+					"EwPIWPJ9",
+					DependencyKind::Required,
+					ModSource::modrinth("EwPIWPJ9"),
+				),
+				test_util::make_dep_with_source(
+					"dynamiccrosshair",
+					DependencyKind::Required,
+					ModSource::modrinth("dynamiccrosshair"),
+				),
+			],
+		);
+		mock.add_deps("vid-dc", vec![]);
+
+		let result = resolver
+			.resolve("A", ModSource::modrinth("A"))
+			.await
+			.unwrap();
+
+		let dc_count = result
+			.iter()
+			.filter(|m| m.mod_id == "dynamiccrosshair")
+			.count();
+		assert_eq!(
+			dc_count, 1,
+			"mod referenced by both raw ID and slug should appear exactly once"
+		);
+
+		let dc = result
+			.iter()
+			.find(|m| m.mod_id == "dynamiccrosshair")
+			.unwrap();
+		assert_eq!(dc.source, ModSource::modrinth("dynamiccrosshair"));
+	}
+
+	#[tokio::test]
 	async fn test_optional_deps_of_required_parents_stay_optional() {
 		let (resolver, mock) = setup_resolver();
 
@@ -556,41 +697,5 @@ mod tests {
 			DependencyKind::Optional,
 			"optional deps of required parents should stay Optional"
 		);
-	}
-
-	#[tokio::test]
-	async fn test_longer_circular_dependency() {
-		let (resolver, mock) = setup_resolver();
-
-		mock.add_mod("A", test_util::make_mod_info("A"));
-		mock.add_mod("B", test_util::make_mod_info("B"));
-		mock.add_mod("C", test_util::make_mod_info("C"));
-
-		mock.add_versions("A", vec![test_util::make_version("1.0", "vid-a")]);
-		mock.add_versions("B", vec![test_util::make_version("1.0", "vid-b")]);
-		mock.add_versions("C", vec![test_util::make_version("1.0", "vid-c")]);
-
-		mock.add_deps(
-			"vid-a",
-			vec![test_util::make_dep("B", DependencyKind::Required)],
-		);
-		mock.add_deps(
-			"vid-b",
-			vec![test_util::make_dep("C", DependencyKind::Required)],
-		);
-		mock.add_deps(
-			"vid-c",
-			vec![test_util::make_dep("A", DependencyKind::Required)],
-		);
-
-		let result = resolver.resolve("A", ModSource::modrinth("A")).await;
-
-		assert!(result.is_err());
-		let err = result.unwrap_err();
-		let yammm_err = err.downcast_ref::<crate::errors::YammmError>();
-		assert!(matches!(
-			yammm_err,
-			Some(crate::errors::YammmError::CircularDependency { .. })
-		));
 	}
 }

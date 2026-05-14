@@ -293,11 +293,12 @@ fn test_init_command_basic() {
 
 	// Either it succeeds, or it gives a meaningful error message
 	assert!(
-		output.status.success() ||
-			stderr.contains("error") ||
-			stderr.contains("Error"),
+		output.status.success()
+			|| stderr.contains("error")
+			|| stderr.contains("Error"),
 		"Command should succeed or show meaningful error. stdout: {}, stderr: {}",
-		stdout, stderr
+		stdout,
+		stderr
 	);
 }
 
@@ -342,10 +343,10 @@ fn test_e2e_nominal_flow() {
 		String::from_utf8_lossy(&output.stderr)
 	);
 
-	// Verify mod.ron exists
+	// Verify entry.ron exists
 	assert!(
-		work_dir.join("mods/fabric-api/mod.ron").exists(),
-		"fabric-api mod.ron missing"
+		work_dir.join("mods/fabric-api/entry.ron").exists(),
+		"fabric-api entry.ron missing"
 	);
 
 	// 3. Get info
@@ -443,18 +444,18 @@ fn test_e2e_mod_ron_source_preserved() {
 		String::from_utf8_lossy(&output.stderr)
 	);
 
-	let mod_ron_path = work_dir.join("mods/fabric-api/mod.ron");
-	assert!(mod_ron_path.exists(), "mod.ron should exist");
+	let mod_ron_path = work_dir.join("mods/fabric-api/entry.ron");
+	assert!(mod_ron_path.exists(), "entry.ron should exist");
 
 	let mod_ron_content = fs::read_to_string(&mod_ron_path).unwrap();
 	assert!(
 		mod_ron_content.contains("modrinth"),
-		"mod.ron should contain modrinth source type, got: {}",
+		"entry.ron should contain modrinth source type, got: {}",
 		mod_ron_content
 	);
 	assert!(
 		mod_ron_content.contains("fabric-api"),
-		"mod.ron should contain the mod id"
+		"entry.ron should contain the mod id"
 	);
 }
 
@@ -486,7 +487,7 @@ fn test_e2e_add_and_remove_cycle() {
 		.expect("Failed to execute add command");
 	assert!(output.status.success());
 
-	assert!(work_dir.join("mods/fabric-api/mod.ron").exists());
+	assert!(work_dir.join("mods/fabric-api/entry.ron").exists());
 
 	let output = Command::new(yammm_bin())
 		.args(["remove", "fabric-api", "--yes"])
@@ -587,16 +588,16 @@ fn test_e2e_add_url_source() {
 	);
 
 	let mod_dir = work_dir.join("mods/some-mod");
-	assert!(mod_dir.join("mod.ron").exists(), "mod.ron should exist");
+	assert!(mod_dir.join("entry.ron").exists(), "entry.ron should exist");
 
-	let mod_ron = fs::read_to_string(mod_dir.join("mod.ron")).unwrap();
+	let mod_ron = fs::read_to_string(mod_dir.join("entry.ron")).unwrap();
 	assert!(
 		mod_ron.contains("url"),
-		"mod.ron should contain url source type"
+		"entry.ron should contain url source type"
 	);
 	assert!(
 		mod_ron.contains("example.com"),
-		"mod.ron should contain the URL"
+		"entry.ron should contain the URL"
 	);
 }
 
@@ -636,16 +637,16 @@ fn test_e2e_add_file_source() {
 	);
 
 	let mod_dir = work_dir.join("mods/test-mod");
-	assert!(mod_dir.join("mod.ron").exists(), "mod.ron should exist");
+	assert!(mod_dir.join("entry.ron").exists(), "entry.ron should exist");
 
-	let mod_ron = fs::read_to_string(mod_dir.join("mod.ron")).unwrap();
+	let mod_ron = fs::read_to_string(mod_dir.join("entry.ron")).unwrap();
 	assert!(
 		mod_ron.contains("url"),
-		"mod.ron should contain url source type"
+		"entry.ron should contain url source type"
 	);
 	assert!(
 		mod_ron.contains("test-mod.jar"),
-		"mod.ron should reference the file path"
+		"entry.ron should reference the file path"
 	);
 }
 
@@ -693,18 +694,18 @@ fn test_e2e_add_github_source() {
 
 	let mod_dir = work_dir.join("mods/iris");
 	assert!(
-		mod_dir.join("mod.ron").exists(),
-		"mod.ron should exist for GitHub mod"
+		mod_dir.join("entry.ron").exists(),
+		"entry.ron should exist for GitHub mod"
 	);
 
-	let mod_ron = fs::read_to_string(mod_dir.join("mod.ron")).unwrap();
+	let mod_ron = fs::read_to_string(mod_dir.join("entry.ron")).unwrap();
 	assert!(
 		mod_ron.contains("github"),
-		"mod.ron should contain github source type"
+		"entry.ron should contain github source type"
 	);
 	assert!(
 		mod_ron.contains("IrisShaders/Iris"),
-		"mod.ron should reference the repo"
+		"entry.ron should reference the repo"
 	);
 }
 

@@ -1,30 +1,20 @@
 //! Persistence layer for individual entry files (mods, resource packs, shaders).
 //!
-//! Each tracked item is stored in `mods/<slug>/mod.ron`.
+//! Each tracked item is stored in `mods/<slug>/entry.ron`.
 
-use crate::config::ModpackManifest;
 use crate::types::TrackedMod;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Read/write access to a directory of tracked entries.
 ///
-/// Each entry has its own subdirectory containing a `mod.ron` file.
+/// Each entry has its own subdirectory containing a `entry.ron` file.
 /// Used for mods, resource packs, and shader packs alike.
 pub struct EntryStore {
 	dir: PathBuf,
 }
 
 impl EntryStore {
-	pub fn new(
-		root: &Path,
-		config: &ModpackManifest,
-	) -> Self {
-		Self {
-			dir: config.mods_dir(root),
-		}
-	}
-
 	/// Create an EntryStore from an explicit directory path
 	pub fn from_dir(dir: PathBuf) -> Self {
 		Self { dir }
@@ -44,12 +34,12 @@ impl EntryStore {
 		self.dir.join(id)
 	}
 
-	/// Path to an entry's RON file: `<dir>/<id>/mod.ron`
+	/// Path to an entry's RON file: `<dir>/<id>/entry.ron`
 	pub fn entry_path(
 		&self,
 		id: &str,
 	) -> PathBuf {
-		self.dir.join(id).join("mod.ron")
+		self.dir.join(id).join("entry.ron")
 	}
 
 	/// Check if an entry exists.
@@ -73,6 +63,7 @@ impl EntryStore {
 	}
 
 	/// Save an entry's RON data. Creates parent directory if needed.
+	/// Uses atomic write (.tmp + rename) to prevent corruption on crash.
 	pub fn save(
 		&self,
 		id: &str,
@@ -87,8 +78,14 @@ impl EntryStore {
 			tracked_mod,
 			ron::ser::PrettyConfig::default(),
 		)?;
-		std::fs::write(&path, contents)
-			.context(format!("Failed to write entry metadata for '{}'", id))
+		let tmp_path = path.with_extension("tmp");
+		std::fs::write(&tmp_path, &contents)
+			.context(format!("Failed to write entry metadata for '{}'", id))?;
+		std::fs::rename(&tmp_path, &path)
+			.inspect_err(|_| {
+				let _ = std::fs::remove_file(&tmp_path);
+			})
+			.context(format!("Failed to commit entry metadata for '{}'", id))
 	}
 
 	/// Remove an entry's directory. No-op if it doesn't exist.
@@ -106,7 +103,7 @@ impl EntryStore {
 		Ok(())
 	}
 
-	/// List all entries by reading every `<slug>/mod.ron`.
+	/// List all entries by reading every `<slug>/entry.ron`.
 	pub fn list(&self) -> Result<Vec<TrackedMod>> {
 		let mut entries = Vec::new();
 		if !self.dir.exists() {
@@ -118,7 +115,7 @@ impl EntryStore {
 			let entry = entry.context("Failed to read directory entry")?;
 			let path = entry.path();
 			if path.is_dir() {
-				let ron_path = path.join("mod.ron");
+				let ron_path = path.join("entry.ron");
 				if ron_path.exists() {
 					let id = match path.file_name().and_then(|n| n.to_str()) {
 						Some(name) if !name.is_empty() => name,

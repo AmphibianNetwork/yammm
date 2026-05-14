@@ -112,21 +112,24 @@ impl ModpackManifest {
 		deps: &std::collections::HashMap<String, String>,
 	) -> bool {
 		let mut updated = false;
-		if let Some(minecraft_ver) = deps.get("minecraft") {
-			if self.minecraft_version.is_empty() {
-				self.minecraft_version = minecraft_ver.clone();
-				updated = true;
-			}
+		if let Some(minecraft_ver) = deps.get("minecraft")
+			&& self.minecraft_version.is_empty()
+		{
+			self.minecraft_version = minecraft_ver.clone();
+			updated = true;
 		}
 		for (key, value) in deps {
-			if let Some(loader_name) = key.strip_suffix("-loader") {
-				if let Ok(loader_type) = loader_name.parse::<LoaderType>() {
-					if self.loader.version.is_empty() {
-						self.loader.loader = Some(loader_type);
-						self.loader.version = value.clone();
-						updated = true;
-					}
-				}
+			if key == "minecraft" {
+				continue;
+			}
+			let loader_name =
+				key.strip_suffix("-loader").unwrap_or(key.as_str());
+			if let Ok(loader_type) = loader_name.parse::<LoaderType>()
+				&& self.loader.version.is_empty()
+			{
+				self.loader.loader = Some(loader_type);
+				self.loader.version = value.clone();
+				updated = true;
 			}
 		}
 		updated
@@ -258,6 +261,28 @@ mod tests {
 		assert!(updated);
 		assert_eq!(config.loader.loader, Some(LoaderType::Fabric));
 		assert_eq!(config.loader.version, "0.16.5");
+	}
+
+	#[test]
+	fn test_apply_index_dependencies_loader_bare_key() {
+		let mut config = ModpackManifest::new();
+		let mut deps = std::collections::HashMap::new();
+		deps.insert("forge".to_string(), "49.0.30".to_string());
+		let updated = config.apply_index_dependencies(&deps);
+		assert!(updated);
+		assert_eq!(config.loader.loader, Some(LoaderType::Forge));
+		assert_eq!(config.loader.version, "49.0.30");
+	}
+
+	#[test]
+	fn test_apply_index_dependencies_neoforge_loader_key() {
+		let mut config = ModpackManifest::new();
+		let mut deps = std::collections::HashMap::new();
+		deps.insert("neoforge-loader".to_string(), "20.1.0".to_string());
+		let updated = config.apply_index_dependencies(&deps);
+		assert!(updated);
+		assert_eq!(config.loader.loader, Some(LoaderType::NeoForge));
+		assert_eq!(config.loader.version, "20.1.0");
 	}
 
 	#[test]

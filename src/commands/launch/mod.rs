@@ -50,8 +50,8 @@ fn install_signal_handlers() {
 	#[cfg(unix)]
 	{
 		let _ = ctrlc::set_handler(|| {
-			INTERRUPTED.store(true, Ordering::Relaxed);
-			let pid = CHILD_PID.load(Ordering::Relaxed);
+			INTERRUPTED.store(true, Ordering::Release);
+			let pid = CHILD_PID.load(Ordering::Acquire);
 			if pid > 0 {
 				unsafe {
 					libc::kill(pid as i32, libc::SIGINT);
@@ -69,8 +69,8 @@ fn install_signal_handlers() {
 	#[cfg(windows)]
 	{
 		let _ = ctrlc::set_handler(|| {
-			INTERRUPTED.store(true, Ordering::Relaxed);
-			let pid = CHILD_PID.load(Ordering::Relaxed);
+			INTERRUPTED.store(true, Ordering::Release);
+			let pid = CHILD_PID.load(Ordering::Acquire);
 			if pid > 0 {
 				let _ = std::process::Command::new("taskkill")
 					.args(["/PID", &pid.to_string(), "/T", "/F"])
@@ -82,20 +82,22 @@ fn install_signal_handlers() {
 
 #[cfg(unix)]
 extern "C" fn sigterm_handler(_sig: libc::c_int) {
-	let pid = CHILD_PID.load(Ordering::Relaxed);
+	let pid = CHILD_PID.load(Ordering::Acquire);
 	if pid > 0 {
 		unsafe {
 			libc::kill(pid as i32, libc::SIGTERM);
 		}
 	}
-	std::process::exit(143);
+	unsafe {
+		libc::_exit(143);
+	}
 }
 
 fn spawn_java_process(
 	mut cmd: std::process::Command
 ) -> Result<std::process::Child> {
 	let child = cmd.spawn()?;
-	CHILD_PID.store(child.id(), Ordering::Relaxed);
+	CHILD_PID.store(child.id(), Ordering::Release);
 	Ok(child)
 }
 
@@ -118,7 +120,7 @@ fn wait_for_child(
 			}
 		}
 
-		if INTERRUPTED.load(Ordering::Relaxed) && deadline.is_none() {
+		if INTERRUPTED.load(Ordering::Acquire) && deadline.is_none() {
 			crate::output::info("Shutting down...");
 			deadline = Some(
 				std::time::Instant::now()
@@ -126,14 +128,14 @@ fn wait_for_child(
 			);
 		}
 
-		if let Some(dl) = deadline {
-			if std::time::Instant::now() > dl {
-				crate::output::warning(
-					"Server did not exit in time, force killing",
-				);
-				let _ = child.kill();
-				return Ok(child.wait()?);
-			}
+		if let Some(dl) = deadline
+			&& std::time::Instant::now() > dl
+		{
+			crate::output::warning(
+				"Server did not exit in time, force killing",
+			);
+			let _ = child.kill();
+			return Ok(child.wait()?);
 		}
 
 		std::thread::sleep(std::time::Duration::from_millis(
@@ -282,13 +284,13 @@ pub(super) fn extract_module_path_jars(
 	let mut jars = Vec::new();
 	let mut iter = resolved_args.iter();
 	while let Some(arg) = iter.next() {
-		if arg == "-p" {
-			if let Some(path_str) = iter.next() {
-				for part in path_str.split(crate::utils::CLASSPATH_SEPARATOR) {
-					let p = PathBuf::from(part);
-					if p.exists() {
-						jars.push(p);
-					}
+		if arg == "-p"
+			&& let Some(path_str) = iter.next()
+		{
+			for part in path_str.split(crate::utils::CLASSPATH_SEPARATOR) {
+				let p = PathBuf::from(part);
+				if p.exists() {
+					jars.push(p);
 				}
 			}
 		}

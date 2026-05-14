@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::error::ApiError;
 use crate::api::ApiClient;
+use crate::api::error::ApiError;
 use crate::types::{HashType, ModInfo, ModSource, ModVersion};
 use crate::utils::slugify;
 
@@ -85,7 +85,7 @@ impl GitHubClient {
 			download_url: jar_asset.browser_download_url.clone(),
 			hash: None,
 			hash_type: HashType::default(),
-			file_size: jar_asset.size as u64,
+			file_size: jar_asset.size.max(0) as u64,
 			release_date: release.published_at.unwrap_or_default(),
 		})
 	}

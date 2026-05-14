@@ -131,7 +131,7 @@ impl Serialize for VersionReq {
 	where
 		S: Serializer,
 	{
-		serializer.serialize_str(&self.as_str())
+		serializer.serialize_str(&self.display_str())
 	}
 }
 
@@ -215,8 +215,8 @@ impl VersionReq {
 		}
 	}
 
-	/// Returns the requirement as a string
-	pub fn as_str(&self) -> String {
+	/// Returns the requirement as a display string (handles Any as "*")
+	pub fn display_str(&self) -> String {
 		match self.operator {
 			Operator::Any => "*".to_string(),
 			_ => format!("{}{}", self.operator.prefix(), self.version),
@@ -438,7 +438,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_version_parse_with_suffix() {
+	fn test_version_with_suffix() {
 		let v = Version::parse("1.20.4-SNAPSHOT").unwrap();
 		assert_eq!(v.as_str(), "1.20.4-SNAPSHOT");
 	}
@@ -446,7 +446,7 @@ mod tests {
 	#[test]
 	fn test_version_req_parse() {
 		let req = VersionReq::parse(">=1.20").unwrap();
-		assert_eq!(req.as_str(), ">=1.20");
+		assert_eq!(req.display_str(), ">=1.20");
 	}
 
 	#[test]
@@ -495,6 +495,7 @@ mod tests {
 		assert!(req.matches("1.0.0"));
 		assert!(req.matches("2.0.0"));
 		assert!(req.matches("0.0.1"));
+		assert!(req.matches("0.0.0"));
 	}
 
 	#[test]
@@ -574,6 +575,6 @@ mod tests {
 	#[test]
 	fn test_version_req_from_str() {
 		let req: VersionReq = ">=1.20".parse().unwrap();
-		assert_eq!(req.as_str(), ">=1.20");
+		assert_eq!(req.display_str(), ">=1.20");
 	}
 }

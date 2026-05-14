@@ -142,7 +142,8 @@ impl CacheManager {
 	}
 
 	/// Evict whole version directories at a time.
-	/// Directories sorted by newest file's atime — least-recently-used removed first.
+	/// Directories sorted by newest file's mtime — least-recently-modified removed first.
+	/// Uses mtime instead of atime because atime is unreliable (noatime mounts).
 	fn clean_version_dirs(
 		&self,
 		subdir: &str,
@@ -167,13 +168,13 @@ impl CacheManager {
 				if count == 0 {
 					continue;
 				}
-				let newest_atime =
-					newest_access_time(&path).unwrap_or(UNIX_EPOCH);
-				version_dirs.push((path, size, newest_atime));
+				let newest_mtime =
+					newest_modified_time(&path).unwrap_or(UNIX_EPOCH);
+				version_dirs.push((path, size, newest_mtime));
 			}
 		}
 
-		// Sort by newest atime ascending — evict LRU versions first
+		// Sort by newest mtime ascending — evict LRU versions first
 		version_dirs.sort_by_key(|a| a.2);
 
 		let mut removed = 0u64;
@@ -224,20 +225,20 @@ fn dir_stats_recursive(dir: &Path) -> (usize, u64) {
 	(count, size)
 }
 
-fn newest_access_time(dir: &Path) -> Option<SystemTime> {
+fn newest_modified_time(dir: &Path) -> Option<SystemTime> {
 	let mut newest = None;
 	if let Ok(entries) = fs::read_dir(dir) {
 		for entry in entries.flatten() {
 			let path = entry.path();
 			if path.is_file() {
 				if let Ok(meta) = entry.metadata() {
-					let atime = meta.accessed().ok()?;
-					newest = Some(newest.unwrap_or(atime).max(atime));
+					let mtime = meta.modified().ok()?;
+					newest = Some(newest.unwrap_or(mtime).max(mtime));
 				}
-			} else if path.is_dir() {
-				if let Some(sub_atime) = newest_access_time(&path) {
-					newest = Some(newest.unwrap_or(sub_atime).max(sub_atime));
-				}
+			} else if path.is_dir()
+				&& let Some(sub_mtime) = newest_modified_time(&path)
+			{
+				newest = Some(newest.unwrap_or(sub_mtime).max(sub_mtime));
 			}
 		}
 	}

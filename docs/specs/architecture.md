@@ -11,7 +11,7 @@ yammm is a Rust CLI for managing Minecraft modpacks. It uses a layered architect
 - **Separation of concerns**: Each module handles one domain (API clients, providers, storage, caching)
 - **Abstraction over sources**: `ModSourceProvider` trait unifies all 3 mod sources behind a common interface
 - **Cache transparency**: `JarCache` handles all JAR storage and deduplication; commands don't manage files directly
-- **Graceful failures**: No panics, proper error propagation with typed `ErrorKind` + exit codes
+- **Graceful failures**: No panics, proper error propagation with typed `YammmError` + exit codes
 
 ---
 
@@ -26,13 +26,14 @@ yammm is a Rust CLI for managing Minecraft modpacks. It uses a layered architect
 │  GlobalConfig │ SourceRegistry │ App │ JarCache │ HTTP      │
 ├─────────────────────────────────────────────────────────────┤
 │                    Command Layer                             │
-│  13 commands: init, add, remove, search, info, update,      │
-│  export, import, launch, cache, config, organize,           │
-│  completions                                                │
+│  16 commands: init, add, remove, search, info, update,      │
+│  export, import, launch, auth, cache, config, self-update,  │
+│  completions, organize, manage                               │
 ├─────────────────────────────────────────────────────────────┤
 │                   Provider Layer                             │
-│  ModSourceProvider trait + 3 implementations:               │
-│  ModrinthSource │ CurseForgeSource │ UrlSource               │
+│  Provider enum (manual dispatch) + ModSourceProvider trait  │
+│  + 3 implementations: ModrinthSource, CurseForgeSource,     │
+│  UrlSource                                                   │
 ├─────────────────────────────────────────────────────────────┤
 │                     API Layer                                │
 │  Raw HTTP clients: ModrinthClient, CurseForgeClient,        │
@@ -40,8 +41,8 @@ yammm is a Rust CLI for managing Minecraft modpacks. It uses a layered architect
 │  ForgeClient, NeoForgeClient                                │
 ├─────────────────────────────────────────────────────────────┤
 │          Domain / Storage / Cache / Config                   │
-│  Types (ModSource, ModRon, Version, HashType, ...)          │
-│  ModStore (RON) │ ModpackConfig (TOML) │ JarCache           │
+│  Types (ModSource, TrackedMod, Version, HashType, ...)      │
+│  EntryStore (RON) │ ManifestStore (TOML) │ JarCache         │
 │  GlobalConfig (TOML) │ Storage (facade)                     │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -54,14 +55,14 @@ yammm is a Rust CLI for managing Minecraft modpacks. It uses a layered architect
 | ------------ | ------------------------------------------------------------------------------ |
 | `cli.rs`     | Argument parsing (clap), command dispatch                                      |
 | `app.rs`     | `App` (loaded modpack), `AppContext` (global CLI state)                        |
-| `commands/`  | 13 command implementations                                                     |
-| `providers/` | `ModSourceProvider` trait + 3 source implementations + registry                |
+| `commands/`  | 16 command implementations (2 behind `tui` feature gate)                      |
+| `providers/` | `ModSourceProvider` trait + 3 source implementations + `Provider` enum + registry |
 | `api/`       | Raw HTTP clients for external services                                         |
 | `services/`  | Business logic: dependency resolver, download manager                          |
-| `storage/`   | Persistence: `ModStore` (RON), `JarCache`, `ModpackStore`, `Storage` facade    |
+| `storage/`   | Persistence: `EntryStore` (RON), `JarCache`, `ManifestStore`, `Storage` facade |
 | `config/`    | Global and modpack configuration (TOML-based)                                  |
-| `types/`     | Domain types: `ModSource`, `ModRon`, `Version`, `VersionReq`, `HashType`, etc. |
-| `errors.rs`  | Typed error classification (`ErrorKind`) with exit-code mapping                |
+| `types/`     | Domain types: `ModSource`, `TrackedMod`, `Version`, `VersionReq`, `HashType`, etc. |
+| `errors/`    | Typed error classification (`YammmError`) with exit-code mapping                |
 | `output.rs`  | Terminal output formatting (colors, progress bars, tables)                     |
 | `utils/`     | Helpers: `slugify`, `format_size`, `print_error`, etc.                         |
 
@@ -79,25 +80,28 @@ Global state shared across all commands, created once at startup:
 - `registry: Arc<SourceRegistry>` — provider registry (maps source keys to providers)
 - `http_client: reqwest::Client` — shared HTTP client
 - `insecure: bool` — SSL verification disabled flag
+- `cache_dir: PathBuf` — resolved cache directory
+- `jar_cache: JarCache` — global JAR cache
 
 Initialization flow:
 1. Load global config from disk (or use defaults)
 2. Build HTTP client (with optional insecure mode)
-3. Initialize `JarCache`
-4. Find and load modpack if `modpack.toml` exists in CWD or `--config` path
-5. Build `SourceRegistry` from config (CurseForge provider requires API key)
+3. Resolve cache directory (env var → config → platform default)
+4. Initialize `JarCache`
+5. Find and load modpack if `modpack.toml` exists in CWD or `--config` path
+6. Build `SourceRegistry` from config (CurseForge provider requires API key)
 
 ### App
 
 Represents a loaded modpack:
 
 - `root_dir: PathBuf` — modpack root directory
-- `config: ModpackConfig` — parsed `modpack.toml`
+- `config: ModpackManifest` — parsed `modpack.toml`
 - `storage: Storage` — unified storage facade
 - `cache: JarCache` — global JAR cache
 
 Three construction paths:
-- `App::new()` — explicit config
+- `App::from_parts()` — explicit config
 - `App::load()` — from existing `modpack.toml`
 - `App::create()` — default/empty config (for `init`)
 
@@ -109,7 +113,9 @@ The key architectural split is between **API clients** (`api/`) and **providers*
 
 - **API clients** are thin HTTP wrappers that handle request/response serialization for specific services. They know about HTTP headers, endpoints, and response formats but nothing about yammm's domain.
 
-- **Providers** implement the `ModSourceProvider` trait and translate API client responses into yammm's domain types (`ModInfo`, `ModVersion`, `Dependency`). They also add business logic like version filtering, loader matching, and hash type mapping.
+- **Providers** implement the `ModSourceProvider` trait and translate API client responses into yammm's domain types (`ModInfo`, `ModVersion`, `SourceDependency`). They also add business logic like version filtering, loader matching, and hash type mapping.
+
+Dispatch is via the `Provider` enum with a `dispatch!` macro instead of `dyn ModSourceProvider`, avoiding boxing of async futures.
 
 This separation means adding a new mod source requires:
 1. An API client in `api/` (HTTP concerns)
@@ -123,9 +129,9 @@ This separation means adding a new mod source requires:
 1. **Parse CLI** via clap in `cli.rs`
 2. **Build AppContext**: load config, init cache, find/load modpack, build registry
 3. **Execute command**: each command accesses `AppContext` for state
-4. **Delegate to providers/services**: commands call `ModSourceProvider` methods or `DependencyResolver` / download manager
-5. **Persist changes**: `ModStore` saves `.ron` files, `ModpackConfig` saves `modpack.toml`
-6. **Return exit code** via `errors::exit_code()` — typed `ErrorKind` with legacy fallback
+4. **Delegate to providers/services**: commands call `Provider` methods or `DependencyResolver` / download manager
+5. **Persist changes**: `EntryStore` saves `entry.ron` files, `ManifestStore` saves `modpack.toml`
+6. **Return exit code** via `errors::exit_code()` — typed `YammmError` with legacy fallback
 
 ---
 

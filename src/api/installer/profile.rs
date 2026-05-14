@@ -54,6 +54,7 @@ pub fn extract_install_profile(
 pub fn extract_file_from_installer(
 	installer_path: &str,
 	installer_jar: &Path,
+	temp_dir: &Path,
 ) -> Result<String> {
 	let clean_path = installer_path.trim_start_matches('/');
 	let file = std::fs::File::open(installer_jar)?;
@@ -63,12 +64,10 @@ pub fn extract_file_from_installer(
 		format!("File {} not found in installer JAR", clean_path)
 	})?;
 
-	let tmp_dir = std::env::temp_dir()
-		.join(format!("yammm-installer-{}", std::process::id()));
-	std::fs::create_dir_all(&tmp_dir)?;
+	std::fs::create_dir_all(temp_dir)?;
 
 	let filename = clean_path.replace('/', "_");
-	let tmp_path = tmp_dir.join(&filename);
+	let tmp_path = temp_dir.join(&filename);
 	let mut out_file = std::fs::File::create(&tmp_path)?;
 	std::io::copy(&mut zip_file, &mut out_file)?;
 
@@ -113,16 +112,16 @@ pub(crate) fn find_neoforge_or_forge_version_dir(
 	lib_dir: &Path
 ) -> Option<PathBuf> {
 	let neoforge_dir = lib_dir.join("net").join("neoforged").join("neoforge");
-	if neoforge_dir.exists() {
-		if let Some(version_dir) = find_dir_with_jar(&neoforge_dir) {
-			return Some(version_dir);
-		}
+	if neoforge_dir.exists()
+		&& let Some(version_dir) = find_dir_with_jar(&neoforge_dir)
+	{
+		return Some(version_dir);
 	}
 	let forge_dir = lib_dir.join("net").join("minecraftforge").join("forge");
-	if forge_dir.exists() {
-		if let Some(version_dir) = find_dir_with_jar(&forge_dir) {
-			return Some(version_dir);
-		}
+	if forge_dir.exists()
+		&& let Some(version_dir) = find_dir_with_jar(&forge_dir)
+	{
+		return Some(version_dir);
 	}
 	None
 }

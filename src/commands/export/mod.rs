@@ -137,7 +137,7 @@ fn export_project_type_to_ympk(
 		let ron_path = store.entry_path(&item.id);
 		if ron_path.exists() {
 			let content = std::fs::read_to_string(&ron_path)?;
-			let entry_path = format!("{}/{}/mod.ron", dir_name, item.id);
+			let entry_path = format!("{}/{}/entry.ron", dir_name, item.id);
 			zip.start_file::<_, ()>(entry_path, SimpleFileOptions::default())?;
 			zip.write_all(content.as_bytes())?;
 		}

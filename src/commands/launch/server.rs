@@ -144,10 +144,10 @@ fn launch_with_unix_args(
 	let mut java_args = Vec::new();
 	java_args.extend(super::java::log4j_mitigation_args(mc_version));
 
-	if super::java::needs_log4j_config_override(mc_version) {
-		if let Ok(config_args) = super::java::write_log4j_config(server_dir) {
-			java_args.extend(config_args);
-		}
+	if super::java::needs_log4j_config_override(mc_version)
+		&& let Ok(config_args) = super::java::write_log4j_config(server_dir)
+	{
+		java_args.extend(config_args);
 	}
 
 	for arg in &launch_ctx.mc_jvm_args {
@@ -189,10 +189,9 @@ fn launch_with_classpath(
 	cache: &crate::storage::JarCache,
 	minecraft_version: &str,
 ) -> Result<()> {
-	let server_jar = launch_ctx
-		.classpath_jars
-		.first()
-		.ok_or_else(|| anyhow::anyhow!("No classpath jars found"))?;
+	let server_jar = launch_ctx.classpath_jars.first().ok_or_else(|| {
+		crate::errors::YammmError::download_failed("No classpath jars found")
+	})?;
 	let dest_jar = server_dir.join("server.jar");
 	if dest_jar.exists() {
 		std::fs::remove_file(&dest_jar)?;
@@ -217,10 +216,10 @@ fn launch_with_classpath(
 
 	java_args.extend(super::java::log4j_mitigation_args(minecraft_version));
 
-	if super::java::needs_log4j_config_override(minecraft_version) {
-		if let Ok(config_args) = super::java::write_log4j_config(server_dir) {
-			java_args.extend(config_args);
-		}
+	if super::java::needs_log4j_config_override(minecraft_version)
+		&& let Ok(config_args) = super::java::write_log4j_config(server_dir)
+	{
+		java_args.extend(config_args);
 	}
 
 	if let Some(resolved_args) = &resolved.resolved_jvm_args {
@@ -345,23 +344,21 @@ fn link_shim_jars(
 		for arg in line.split_whitespace() {
 			if arg.ends_with(".jar") && !arg.starts_with('-') {
 				let jar_path = PathBuf::from(arg);
-				if !jar_path.is_absolute() {
-					if let Some(jar_name) = jar_path.file_name() {
-						if let Some(found) = find_file_in_libraries(
-							lib_dir,
-							jar_name.to_str().unwrap_or(""),
-						) {
-							let link = server_dir.join(jar_name);
-							if !link.exists() {
-								if let Some(parent) = link.parent() {
-									std::fs::create_dir_all(parent)?;
-								}
-								crate::utils::create_symlink(
-									&found.canonicalize().unwrap_or(found),
-									&link,
-								)?;
-							}
+				if !jar_path.is_absolute()
+					&& let Some(jar_name) = jar_path.file_name()
+					&& let Some(found) = find_file_in_libraries(
+						lib_dir,
+						jar_name.to_str().unwrap_or(""),
+					) {
+					let link = server_dir.join(jar_name);
+					if !link.exists() {
+						if let Some(parent) = link.parent() {
+							std::fs::create_dir_all(parent)?;
 						}
+						crate::utils::create_symlink(
+							&found.canonicalize().unwrap_or(found),
+							&link,
+						)?;
 					}
 				}
 			}

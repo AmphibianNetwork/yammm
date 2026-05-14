@@ -30,6 +30,8 @@ pub struct MrpackFile {
 	pub downloads: Vec<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub file_size: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub loaders: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,7 +135,7 @@ fn collect_mrpack_files(
 
 			MrpackFile {
 				path,
-				hashes: build_mrpack_hashes(m),
+				hashes: build_mrpack_hashes(m, cache),
 				env: Some(mod_env_to_mrpack(&m.env)),
 				downloads: if m.download_url.is_empty() {
 					Vec::new()
@@ -141,18 +143,36 @@ fn collect_mrpack_files(
 					vec![m.download_url.clone()]
 				},
 				file_size,
+				loaders: if m.connector_compat {
+					Some(vec!["fabric".to_string()])
+				} else {
+					None
+				},
 			}
 		})
 		.collect()
 }
 
-fn build_mrpack_hashes(m: &TrackedMod) -> MrpackHashes {
-	let sha1 = if m.sha1.is_some() {
-		m.sha1.clone()
-	} else if m.hash_type == HashType::Sha1 {
+fn build_mrpack_hashes(
+	m: &TrackedMod,
+	cache: &crate::storage::JarCache,
+) -> MrpackHashes {
+	let sha1 = if m.hash_type == HashType::Sha1 {
 		m.hash.clone()
 	} else {
-		None
+		m.hash.as_ref().and_then(|h| {
+			let path = cache.get(m.hash_type, h)?;
+			HashType::Sha1
+				.compute_for_file(&path)
+				.map_err(|e| {
+					tracing::warn!(
+						"Failed to compute SHA1 for {}: {e}",
+						path.display()
+					);
+					e
+				})
+				.ok()
+		})
 	};
 
 	match m.hash_type {

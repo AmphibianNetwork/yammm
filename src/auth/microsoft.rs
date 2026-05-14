@@ -21,14 +21,12 @@ struct DeviceCodeResponse {
 	verification_uri: String,
 	expires_in: u64,
 	interval: Option<u64>,
-	#[allow(dead_code)]
 	message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ErrorResponse {
 	error: String,
-	#[allow(dead_code)]
 	error_description: Option<String>,
 }
 
@@ -53,11 +51,24 @@ struct TokenResponse {
 pub async fn device_code_flow(
 	http_client: &reqwest::Client
 ) -> Result<(String, String, u64)> {
-	let resp = http_client
-		.post(DEVICE_CODE_URL)
-		.form(&[("client_id", MS_CLIENT_ID), ("scope", SCOPE)])
-		.send()
-		.await?;
+	let resp = crate::api::retry::send_retried_request(
+		&crate::api::retry::AUTH_RETRY_CONFIG,
+		|| {
+			let client = http_client.clone();
+			async move {
+				client
+					.post(DEVICE_CODE_URL)
+					.form(&[("client_id", MS_CLIENT_ID), ("scope", SCOPE)])
+					.send()
+					.await
+					.map_err(|e| {
+						crate::errors::YammmError::network_error(e.to_string())
+					})
+			}
+		},
+	)
+	.await
+	.map_err(|e| crate::errors::YammmError::network_error(e.to_string()))?;
 
 	let body = resp.text().await?;
 
@@ -71,12 +82,12 @@ pub async fn device_code_flow(
 
 	let resp: DeviceCodeResponse = serde_json::from_str(&body)?;
 
+	let message = resp.message.clone().unwrap_or_else(|| {
+		format!("To sign in, visit: {}", resp.verification_uri)
+	});
 	crate::output::heading("Microsoft Authentication");
 	crate::output::blank_line();
-	crate::output::bullet(format!(
-		"To sign in, visit: {}",
-		resp.verification_uri
-	));
+	crate::output::bullet(&message);
 	crate::output::bullet(format!("Enter code: {}", resp.user_code));
 	crate::output::blank_line();
 	crate::output::info("Waiting for authorization...");
@@ -157,18 +168,33 @@ pub async fn refresh_access_token(
 	http_client: &reqwest::Client,
 	refresh_token: &str,
 ) -> Result<(String, String, u64)> {
-	let body = http_client
-		.post(TOKEN_URL)
-		.form(&[
-			("client_id", MS_CLIENT_ID),
-			("grant_type", "refresh_token"),
-			("refresh_token", refresh_token),
-			("scope", SCOPE),
-		])
-		.send()
-		.await?
-		.text()
-		.await?;
+	let refresh_token_owned = refresh_token.to_string();
+	let resp = crate::api::retry::send_retried_request(
+		&crate::api::retry::AUTH_RETRY_CONFIG,
+		|| {
+			let client = http_client.clone();
+			let rt = refresh_token_owned.clone();
+			async move {
+				client
+					.post(TOKEN_URL)
+					.form(&[
+						("client_id", MS_CLIENT_ID),
+						("grant_type", "refresh_token"),
+						("refresh_token", &rt),
+						("scope", SCOPE),
+					])
+					.send()
+					.await
+					.map_err(|e| {
+						crate::errors::YammmError::network_error(e.to_string())
+					})
+			}
+		},
+	)
+	.await
+	.map_err(|e| crate::errors::YammmError::network_error(e.to_string()))?;
+
+	let body = resp.text().await?;
 
 	match serde_json::from_str::<TokenOrError>(&body)? {
 		TokenOrError::Error(err) => {

@@ -5,8 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::error::ApiError;
 use crate::api::ApiClient;
+use crate::api::error::ApiError;
 use crate::types::{HashType, ModInfo, ModSource, ModVersion};
 
 const MODRINTH_API_URL: &str = "https://api.modrinth.com/v2";
@@ -219,7 +219,7 @@ impl ModrinthClient {
 				.filter(|v| !v.is_empty())
 				.collect(),
 			loaders,
-			downloads: hit.downloads as u64,
+			downloads: hit.downloads.max(0) as u64,
 			url: format!("https://modrinth.com/mod/{}", slug),
 			project_type: hit.project_type.parse().ok(),
 			client_side: hit.client_side,
@@ -244,7 +244,7 @@ impl ModrinthClient {
 		let download_url =
 			primary_file.map(|f| f.url.clone()).unwrap_or_default();
 
-		let file_size = primary_file.map(|f| f.size as u64).unwrap_or(0);
+		let file_size = primary_file.map(|f| f.size.max(0) as u64).unwrap_or(0);
 
 		ModVersion {
 			version_id: Some(version_data.id),

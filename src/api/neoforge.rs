@@ -1,9 +1,9 @@
 //! NeoForge mod loader client for querying available versions,
 //! resolving installer URLs, and running the NeoForge install pipeline.
 
+use crate::api::ApiClient;
 use crate::api::error::ApiError;
 use crate::api::installer::{self, InstallParams, LoaderInstallResult};
-use crate::api::ApiClient;
 use crate::output;
 use crate::utils::maven::parse_maven_versions;
 

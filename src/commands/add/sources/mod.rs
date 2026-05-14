@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::output;
 use crate::providers::{Provider, SearchFilters, SourceRegistry};
+use crate::services::connector::is_connector_installed;
 use crate::types::VersionFilters;
 use crate::types::{
 	LoaderType, ModEnv, ModInfo, ModSource, ModVersion, ProjectType,
@@ -82,21 +83,18 @@ impl<'a> AddContext<'a> {
 			}
 		}
 
-		let version_data = self.resolve_version(provider, &mod_id).await?;
+		let resolved = self.resolve_version(provider, &mod_id).await?;
 
 		output::bullet(format!("Name: {}", mod_info.name));
-		output::bullet(format!("Version: {}", version_data.version));
+		output::bullet(format!("Version: {}", resolved.version_data.version));
 
-		let env = self.env_override.unwrap_or_else(|| {
-			crate::providers::modrinth::mod_env_from_modrinth_sides(
-				mod_info.client_side.as_deref(),
-				mod_info.server_side.as_deref(),
-			)
-		});
+		let env = self
+			.env_override
+			.unwrap_or_else(|| provider.get_mod_env(&mod_info));
 
 		let mut mod_ron = TrackedMod::from_mod_info(
 			&mod_info,
-			&version_data,
+			&resolved.version_data,
 			slug.clone(),
 			project_type,
 			env,
@@ -104,6 +102,10 @@ impl<'a> AddContext<'a> {
 
 		if !self.categories.is_empty() {
 			mod_ron.categories = self.categories.clone();
+		}
+
+		if resolved.connector_compat {
+			mod_ron.connector_compat = true;
 		}
 
 		self.storage.save(project_type, &slug, &mod_ron)?;
@@ -203,10 +205,10 @@ impl<'a> AddContext<'a> {
 			return Ok(ExistingModAction::Continue);
 		}
 
-		if let Ok(existing) = self.storage.load(*project_type, slug) {
-			if existing.source.source_id() != self.source.source_id() {
-				return self.handle_source_conflict(slug, project_type).await;
-			}
+		if let Ok(existing) = self.storage.load(*project_type, slug)
+			&& existing.source.source_id() != self.source.source_id()
+		{
+			return self.handle_source_conflict(slug, project_type).await;
 		}
 
 		self.check_for_update(slug, project_type).await
@@ -296,18 +298,25 @@ impl<'a> AddContext<'a> {
 	///
 	/// If a version constraint was specified (`--version`), finds the first
 	/// matching version. Otherwise, picks the latest compatible version.
+	///
+	/// When running on Forge/NeoForge and no version is found, falls back to
+	/// searching for a Fabric version if Sinytra Connector is installed.
 	async fn resolve_version(
 		&self,
 		provider: &Provider,
 		mod_id: &str,
-	) -> anyhow::Result<ModVersion> {
+	) -> anyhow::Result<ResolvedVersion> {
 		let filters = self.version_filters();
 
-		if let Some(req) = &self.version_req {
+		let result = if let Some(req) = &self.version_req {
 			let versions = provider.get_versions(mod_id, &filters).await?;
 			versions
 				.into_iter()
 				.find(|v| req.matches(&v.version))
+				.map(|v| ResolvedVersion {
+					version_data: v,
+					connector_compat: false,
+				})
 				.ok_or_else(|| {
 					crate::errors::YammmError::version_conflict(format!(
 						"Version matching {} not found",
@@ -316,9 +325,103 @@ impl<'a> AddContext<'a> {
 					.into()
 				})
 		} else {
-			provider.get_latest_version(mod_id, &filters).await
+			provider
+				.get_latest_version(mod_id, &filters)
+				.await
+				.map(|v| ResolvedVersion {
+					version_data: v,
+					connector_compat: false,
+				})
+		};
+
+		if result.is_ok() || !self.is_connector_eligible() {
+			return result;
 		}
+
+		self.try_connector_fallback(provider, mod_id).await
 	}
+
+	fn is_connector_eligible(&self) -> bool {
+		matches!(self.loader, Some(LoaderType::Forge | LoaderType::NeoForge))
+			&& is_connector_installed(self.storage)
+	}
+
+	async fn try_connector_fallback(
+		&self,
+		provider: &Provider,
+		mod_id: &str,
+	) -> anyhow::Result<ResolvedVersion> {
+		let fabric_filters = VersionFilters {
+			minecraft_version: self.mc_version.map(String::from),
+			loader: Some(LoaderType::Fabric),
+		};
+
+		let fabric_result = if let Some(req) = &self.version_req {
+			let versions =
+				provider.get_versions(mod_id, &fabric_filters).await?;
+			versions
+				.into_iter()
+				.find(|v| req.matches(&v.version))
+				.ok_or_else(|| {
+					crate::errors::YammmError::version_conflict(format!(
+						"Version matching {} not found (also checked Fabric via Connector)",
+						req
+					))
+					.into()
+				})
+		} else {
+			provider
+				.get_latest_version(mod_id, &fabric_filters)
+				.await
+				.map_err(|_| {
+					crate::errors::YammmError::mod_not_found(format!(
+						"No versions found for {} (also checked Fabric via Connector)",
+						mod_id
+					))
+					.into()
+				})
+		};
+
+		if fabric_result.is_err() {
+			return fabric_result.map(|v| ResolvedVersion {
+				version_data: v,
+				connector_compat: true,
+			});
+		}
+
+		output::blank_line();
+		output::info(
+			"Sinytra Connector is installed — a Fabric version of this mod is available.",
+		);
+		let proceed = dialoguer::Confirm::new()
+			.with_prompt("Install the Fabric version via Connector?")
+			.default(true)
+			.interact()
+			.unwrap_or(false);
+
+		if !proceed {
+			return Err(crate::errors::YammmError::mod_not_found(format!(
+				"No {} version found for {}",
+				self.loader
+					.map(|l| l.display_name())
+					.unwrap_or("compatible"),
+				mod_id
+			))
+			.into());
+		}
+
+		fabric_result.map(|v| ResolvedVersion {
+			version_data: v,
+			connector_compat: true,
+		})
+	}
+}
+
+/// Result of version resolution, carrying whether the version was found
+/// via Sinytra Connector compatibility (Fabric version on Forge/NeoForge).
+struct ResolvedVersion {
+	version_data: ModVersion,
+	connector_compat: bool,
 }
 
 /// Control flow indicator for `handle_existing_mod`.

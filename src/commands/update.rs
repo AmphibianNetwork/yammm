@@ -46,11 +46,12 @@ pub async fn check_for_updates(
 	storage: &crate::storage::Storage,
 	modpack: &ModpackManifest,
 	registry: &SourceRegistry,
+	max_concurrent: usize,
 ) -> Result<UpdateCheckResult> {
 	let config_filters = modpack.version_filters();
 	let all_items = storage.list_all()?;
 
-	let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+	let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 	let mut tasks = tokio::task::JoinSet::new();
 
 	for mod_ron in &all_items {
@@ -92,15 +93,15 @@ pub async fn check_for_updates(
 	let mut updates = Vec::new();
 	let mut failed_checks: Vec<(String, String)> = Vec::new();
 	while let Some(result) = tasks.join_next().await {
-		let (id, name, current_version, version_result) = result
-			.unwrap_or_else(|e| {
-				(
-					"unknown".to_string(),
-					"unknown".to_string(),
-					String::new(),
-					Err(anyhow::anyhow!("{}", e)),
-				)
-			});
+		let (id, name, current_version, version_result) = match result {
+			Ok(tuple) => tuple,
+			Err(e) => {
+				tracing::warn!("update check task failed: {e}");
+				failed_checks
+					.push(("unknown".to_string(), format!("task failed: {e}")));
+				continue;
+			}
+		};
 		match version_result {
 			Ok(latest) => {
 				if latest.version != current_version {
@@ -139,7 +140,13 @@ impl UpdateCommand {
 		let config_filters = modpack.version_filters();
 
 		let spin = output::spinner("Checking for updates...");
-		let result = check_for_updates(storage, modpack, &ctx.registry).await?;
+		let result = check_for_updates(
+			storage,
+			modpack,
+			&ctx.registry,
+			ctx.global.max_concurrent_downloads(),
+		)
+		.await?;
 		spin.finish_and_clear();
 
 		if !result.failed_checks.is_empty() {
@@ -282,7 +289,13 @@ async fn fetch_updated_deps(
 		return None;
 	}
 
-	let provider = registry.get(source).ok()?;
+	let provider = registry
+		.get(source)
+		.map_err(|e| {
+			tracing::warn!("No provider for {source}: {e}");
+			e
+		})
+		.ok()?;
 	let filters = VersionFilters {
 		minecraft_version: mc_version.map(String::from),
 		loader,
@@ -290,11 +303,19 @@ async fn fetch_updated_deps(
 	let version = provider
 		.get_latest_version(source.source_id(), &filters)
 		.await
+		.map_err(|e| {
+			tracing::warn!("Failed to get latest version for {mod_id}: {e}");
+			e
+		})
 		.ok()?;
 	let version_id = version.version_id?;
 	let raw_deps = provider
 		.get_dependencies(source.source_id(), &version_id)
 		.await
+		.map_err(|e| {
+			tracing::warn!("Failed to get dependencies for {mod_id}: {e}");
+			e
+		})
 		.ok()?;
 
 	Some(

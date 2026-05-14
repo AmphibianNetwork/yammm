@@ -11,9 +11,9 @@ All three cache subdirectories are managed by the `CacheManager`:
 
 | Subdirectory | Content | Eviction strategy |
 |---|---|---|
-| `jars/` | Mod JARs (hash-based) | LRU by individual file |
-| `minecraft/` | MC version JARs, libraries, assets | LRU by version directory |
-| `loaders/` | Fabric/Quilt/Forge/NeoForge libraries | LRU by version directory |
+| `jars/` | Mod JARs (hash-based) | LRU by manifest-recorded access time |
+| `minecraft/` | MC version JARs, libraries, assets | LRU by version directory modification time |
+| `loaders/` | Fabric/Quilt/Forge/NeoForge libraries | LRU by version directory modification time |
 
 ---
 
@@ -78,24 +78,26 @@ This allows sharing mod files across all modpacks without duplication.
 
 Before downloading a mod:
 
-1. Get the hash from the mod source API or from the stored `mod.ron`
+1. Get the hash from the mod source API or from the stored `entry.ron`
 2. Check if the corresponding file exists in `~/.cache/yammm/jars/`
 3. If yes, use the cached file (symlink or reference it)
 4. If no, download and save to global cache
 
-No path is stored in `mod.ron` — only the hash is needed to locate the file.
+No path is stored in `entry.ron` — only the hash is needed to locate the file.
 
 ---
 
 ## Download with Retry
 
-The `JarCache::download()` method includes built-in retry logic:
+The download manager in `services/download.rs` includes retry logic:
 
 1. Download file to a temporary path
 2. Verify hash after download
 3. If hash mismatch, retry up to 3 times with exponential backoff
-4. On success, rename temp file to final hash-based path
+4. On success, write to cache via `JarCache::write_bytes()` or `JarCache::put()`
 5. On persistent failure, remove partial file and return error
+
+The `JarCache` itself does not have a `download()` method — it provides `get()`, `put()`, `write_bytes()`, `remove()`, `contains()`, `count()`, `size()`, `clear()`, and `cleanup()`.
 
 ---
 
@@ -107,7 +109,9 @@ Shows total file count and size for all three subdirectories (`jars/`, `minecraf
 
 ### `yammm cache clean`
 
-Removes oldest files across all subdirectories until the total cache size is under the configured threshold (`cache_max_size_mb` in global config, default 5000 MB). Eviction order: JARs first (by file access time), then Minecraft versions (by directory access time), then loader versions (by directory access time).
+Removes oldest files across all subdirectories until the total cache size is under the configured threshold (`cache_max_size_mb` in global config, default 5000 MB). Eviction order: JARs first (by manifest-recorded access time), then Minecraft versions (by directory modification time), then loader versions (by directory modification time).
+
+**LRU Mechanism:** The `JarCache` maintains a `cache_manifest.json` that records last-access timestamps. This is used instead of filesystem `atime` because atime is unreliable (noatime mounts, etc.). Minecraft and loader version directories use `mtime` (modification time) for ordering — also because atime is unreliable.
 
 ### `yammm cache obliterate`
 
@@ -156,8 +160,8 @@ Downloaded by the launch code from loader-specific APIs. Cached by loader type a
 
 ```toml
 # ~/.config/yammm/config.toml
-cache_dir = ""              # Custom cache directory (empty = platform default)
-cache_max_size_mb = 5000    # Max cache size in MB (0 = unlimited)
+cache_dir = "/custom/cache"     # Custom cache directory (None = platform default)
+cache_max_size_mb = 5000        # Max cache size in MB (None = 5000 default, 0 = unlimited)
 ```
 
 The size limit is checked by `yammm cache clean` but is not enforced automatically. Use `yammm cache clean` or `yammm cache obliterate` to manage cache size.

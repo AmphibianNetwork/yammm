@@ -43,23 +43,38 @@ pub async fn authenticate_xbl(
 	http_client: &reqwest::Client,
 	ms_access_token: &str,
 ) -> Result<(String, String)> {
-	let resp: XblResponse = http_client
-		.post("https://user.auth.xboxlive.com/user/authenticate")
-		.header("Content-Type", "application/json")
-		.header("Accept", "application/json")
-		.json(&serde_json::json!({
-			"Properties": {
-				"AuthMethod": "RPS",
-				"SiteName": "user.auth.xboxlive.com",
-				"RpsTicket": format!("d={}", ms_access_token),
-			},
-			"RelyingParty": "http://auth.xboxlive.com",
-			"TokenType": "JWT",
-		}))
-		.send()
-		.await?
-		.json()
-		.await?;
+	let ms_token_owned = ms_access_token.to_string();
+	let resp: XblResponse = crate::api::retry::send_retried_request(
+		&crate::api::retry::AUTH_RETRY_CONFIG,
+		|| {
+			let client = http_client.clone();
+			let token = ms_token_owned.clone();
+			async move {
+				client
+					.post("https://user.auth.xboxlive.com/user/authenticate")
+					.header("Content-Type", "application/json")
+					.header("Accept", "application/json")
+					.json(&serde_json::json!({
+						"Properties": {
+							"AuthMethod": "RPS",
+							"SiteName": "user.auth.xboxlive.com",
+							"RpsTicket": format!("d={}", token),
+						},
+						"RelyingParty": "http://auth.xboxlive.com",
+						"TokenType": "JWT",
+					}))
+					.send()
+					.await
+					.map_err(|e| {
+						crate::errors::YammmError::network_error(e.to_string())
+					})
+			}
+		},
+	)
+	.await
+	.map_err(|e| crate::errors::YammmError::network_error(e.to_string()))?
+	.json()
+	.await?;
 
 	let uhs = resp
 		.DisplayClaims
@@ -84,22 +99,37 @@ pub async fn authenticate_xsts(
 	xbl_token: &str,
 	xbl_uhs: &str,
 ) -> Result<(String, String)> {
-	let resp: XstsResponse = http_client
-		.post("https://xsts.auth.xboxlive.com/xsts/authorize")
-		.header("Content-Type", "application/json")
-		.header("Accept", "application/json")
-		.json(&serde_json::json!({
-			"Properties": {
-				"SandboxId": "RETAIL",
-				"UserTokens": [xbl_token],
-			},
-			"RelyingParty": "rp://api.minecraftservices.com/",
-			"TokenType": "JWT",
-		}))
-		.send()
-		.await?
-		.json()
-		.await?;
+	let xbl_token_owned = xbl_token.to_string();
+	let resp: XstsResponse = crate::api::retry::send_retried_request(
+		&crate::api::retry::AUTH_RETRY_CONFIG,
+		|| {
+			let client = http_client.clone();
+			let token = xbl_token_owned.clone();
+			async move {
+				client
+					.post("https://xsts.auth.xboxlive.com/xsts/authorize")
+					.header("Content-Type", "application/json")
+					.header("Accept", "application/json")
+					.json(&serde_json::json!({
+						"Properties": {
+							"SandboxId": "RETAIL",
+							"UserTokens": [token],
+						},
+						"RelyingParty": "rp://api.minecraftservices.com/",
+						"TokenType": "JWT",
+					}))
+					.send()
+					.await
+					.map_err(|e| {
+						crate::errors::YammmError::network_error(e.to_string())
+					})
+			}
+		},
+	)
+	.await
+	.map_err(|e| crate::errors::YammmError::network_error(e.to_string()))?
+	.json()
+	.await?;
 
 	let uhs = resp
 		.DisplayClaims

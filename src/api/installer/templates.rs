@@ -12,6 +12,7 @@ pub struct TemplateContext<'a> {
 	pub installer_jar: &'a Path,
 	pub mc_jar: &'a Path,
 	pub root_dir: &'a Path,
+	pub temp_dir: &'a Path,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +33,7 @@ pub fn resolve_data_value(
 		let path = maven_coords_to_path(coords);
 		Ok(ctx.library_dir.join(&path).to_string_lossy().to_string())
 	} else if value.starts_with('/') {
-		extract_file_from_installer(value, ctx.installer_jar)
+		extract_file_from_installer(value, ctx.installer_jar, ctx.temp_dir)
 	} else if value.starts_with('\'') && value.ends_with('\'') {
 		Ok(value[1..value.len() - 1].to_string())
 	} else if value.contains('{') {
@@ -148,6 +149,7 @@ mod tests {
 			installer_jar: Path::new("/install/installer.jar"),
 			mc_jar: Path::new("/libs/1.20.4.jar"),
 			root_dir: Path::new("/root"),
+			temp_dir: Path::new("/tmp/yammm-test"),
 		}
 	}
 

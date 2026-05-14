@@ -9,7 +9,7 @@
 //! | 5 | ConfigError |
 //! | 6 | NetworkError / NetworkRequest |
 //! | 7 | IoError |
-//! | 8 | Api |
+//! | 3-8 | Api (delegates to ApiError::exit_code()) |
 //! | 9 | VersionConflict |
 //! | 10 | CircularDependency |
 
@@ -196,12 +196,14 @@ mod tests {
 		assert!(!YammmError::DownloadFailed("msg".into()).is_retryable());
 		assert!(!YammmError::ConfigError("msg".into()).is_retryable());
 		assert!(YammmError::NetworkError("msg".into()).is_retryable());
-		assert!(YammmError::HashMismatch {
-			name: "n".into(),
-			expected: "e".into(),
-			actual: "a".into()
-		}
-		.is_retryable());
+		assert!(
+			YammmError::HashMismatch {
+				name: "n".into(),
+				expected: "e".into(),
+				actual: "a".into()
+			}
+			.is_retryable()
+		);
 		assert!(
 			YammmError::Api(ApiError::http(429, "rate limited")).is_retryable()
 		);
@@ -212,11 +214,13 @@ mod tests {
 			!YammmError::Api(ApiError::http(404, "not found")).is_retryable()
 		);
 		assert!(!YammmError::VersionConflict("msg".into()).is_retryable());
-		assert!(!YammmError::CircularDependency {
-			mod_id: "m".into(),
-			chain: "c".into()
-		}
-		.is_retryable());
+		assert!(
+			!YammmError::CircularDependency {
+				mod_id: "m".into(),
+				chain: "c".into()
+			}
+			.is_retryable()
+		);
 	}
 
 	#[tokio::test]

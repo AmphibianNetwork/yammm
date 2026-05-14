@@ -5,7 +5,7 @@
 //! ```text
 //! <output_dir>/
 //!   modpack.toml      ← modpack metadata (name, MC version, loader)
-//!   mods/             ← each mod gets its own subdirectory with a mod.ron
+//!   mods/             ← each mod gets its own subdirectory with a entry.ron
 //!   config/           ← shared config files
 //!   resourcepacks/   ← resource pack storage
 //!   shaderpacks/     ← shader pack storage
@@ -27,6 +27,10 @@ use crate::app::AppContext;
 use crate::config::{LoaderConfig, ModpackManifest};
 use crate::output;
 use crate::types::LoaderType;
+
+const DEFAULT_MINECRAFT_VERSION: &str = "1.21.5";
+const DEFAULT_MODPACK_NAME: &str = "my-modpack";
+const DEFAULT_MODPACK_VERSION: &str = "1.0.0";
 
 /// Initialize a new modpack workspace (creates directories and modpack.toml).
 #[derive(Parser, Debug)]
@@ -97,11 +101,13 @@ impl InitCommand {
 		let config = ModpackManifest {
 			name: init_info.name,
 			description: init_info.description.unwrap_or_default(),
-			version: init_info.version.unwrap_or_else(|| "1.0.0".to_string()),
+			version: init_info
+				.version
+				.unwrap_or_else(|| DEFAULT_MODPACK_VERSION.to_string()),
 			minecraft_version: init_info.minecraft_version,
 			loader: LoaderConfig {
 				loader: Some(init_info.loader),
-				version: init_info.loader_version,
+				version: init_info.loader_version.unwrap_or_default(),
 			},
 			mod_path: None,
 			resource_pack_path: None,
@@ -228,11 +234,14 @@ logs/
 		}
 		if interactive {
 			Ok(Input::<String>::new()
-				.with_prompt("Modpack name (default: my-modpack)")
-				.default("my-modpack".to_string())
+				.with_prompt(format!(
+					"Modpack name (default: {})",
+					DEFAULT_MODPACK_NAME
+				))
+				.default(DEFAULT_MODPACK_NAME.to_string())
 				.interact()?)
 		} else {
-			Ok("my-modpack".to_string())
+			Ok(DEFAULT_MODPACK_NAME.to_string())
 		}
 	}
 
@@ -245,7 +254,10 @@ logs/
 		}
 		if interactive {
 			Ok(Input::<String>::new()
-				.with_prompt("Minecraft version (default: 1.20.4)")
+				.with_prompt(format!(
+					"Minecraft version (default: {})",
+					DEFAULT_MINECRAFT_VERSION
+				))
 				.validate_with(|x: &String| -> Result<(), &str> {
 					if x.is_empty() {
 						Err("Version cannot be empty")
@@ -253,10 +265,10 @@ logs/
 						Ok(())
 					}
 				})
-				.default("1.20.4".to_string())
+				.default(DEFAULT_MINECRAFT_VERSION.to_string())
 				.interact()?)
 		} else {
-			Ok("1.20.4".to_string())
+			Ok(DEFAULT_MINECRAFT_VERSION.to_string())
 		}
 	}
 
@@ -290,14 +302,14 @@ logs/
 		loader: &LoaderType,
 		mc_version: &str,
 		http_client: &reqwest::Client,
-	) -> String {
+	) -> Option<String> {
 		if let Some(ref v) = self.loader_version {
-			return v.clone();
+			return Some(v.clone());
 		}
 		if interactive {
 			fetch_loader_version_for(loader, mc_version, http_client).await
 		} else {
-			String::new()
+			None
 		}
 	}
 
@@ -325,9 +337,12 @@ logs/
 	) -> Result<Option<String>> {
 		if interactive {
 			let v = Input::<String>::new()
-				.with_prompt("Modpack version (default: 1.0.0)")
+				.with_prompt(format!(
+					"Modpack version (default: {})",
+					DEFAULT_MODPACK_VERSION
+				))
 				.allow_empty(true)
-				.default("1.0.0".to_string())
+				.default(DEFAULT_MODPACK_VERSION.to_string())
 				.interact()?;
 			Ok(if v.is_empty() { None } else { Some(v) })
 		} else {
@@ -357,14 +372,14 @@ struct InitInfo {
 	version: Option<String>,
 	minecraft_version: String,
 	loader: LoaderType,
-	loader_version: String,
+	loader_version: Option<String>,
 	description: Option<String>,
 }
 
 async fn fetch_loader_version(
 	loader_name: &str,
 	fetch_fn: impl std::future::Future<Output = Result<String, anyhow::Error>>,
-) -> String {
+) -> Option<String> {
 	output::info(format!("Fetching latest {} loader version...", loader_name));
 	match fetch_fn.await {
 		Ok(version) => {
@@ -372,14 +387,14 @@ async fn fetch_loader_version(
 				"{} loader version: {}",
 				loader_name, version
 			));
-			version
+			Some(version)
 		}
 		Err(e) => {
 			output::warning(format!(
 				"Could not fetch {} loader version: {}",
 				loader_name, e
 			));
-			String::new()
+			None
 		}
 	}
 }
@@ -388,7 +403,7 @@ async fn fetch_loader_version_for(
 	loader: &crate::types::LoaderType,
 	mc_version: &str,
 	http_client: &reqwest::Client,
-) -> String {
+) -> Option<String> {
 	match loader {
 		LoaderType::Fabric => {
 			let client = crate::api::FabricClient::new()

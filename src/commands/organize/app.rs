@@ -26,6 +26,7 @@ pub struct OrganizeApp {
 	pub mod_list_state: ModListState,
 	pub dest_list_state: ListState,
 	pub result: OrganizeResultInternal,
+	pub show_help: bool,
 
 	#[cfg(feature = "syntax-highlight")]
 	pub syntax_set: syntect::parsing::SyntaxSet,
@@ -74,6 +75,7 @@ impl OrganizeApp {
 			},
 			dest_list_state: ListState { selected: 0 },
 			result: OrganizeResultInternal::default(),
+			show_help: false,
 			#[cfg(feature = "syntax-highlight")]
 			syntax_set: syntect::parsing::SyntaxSet::load_defaults_newlines(),
 			#[cfg(feature = "syntax-highlight")]

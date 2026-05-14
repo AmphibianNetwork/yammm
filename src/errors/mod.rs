@@ -14,10 +14,10 @@ pub fn exit_code(err: &anyhow::Error) -> i32 {
 	}
 	// Fallback: detect network errors that weren't wrapped in YammmError
 	for cause in err.chain() {
-		if let Some(re) = cause.downcast_ref::<reqwest::Error>() {
-			if re.is_timeout() || re.is_connect() {
-				return 6;
-			}
+		if let Some(re) = cause.downcast_ref::<reqwest::Error>()
+			&& (re.is_timeout() || re.is_connect())
+		{
+			return 6;
 		}
 	}
 	1

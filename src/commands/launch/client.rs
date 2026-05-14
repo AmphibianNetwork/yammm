@@ -64,10 +64,9 @@ pub async fn run(
 
 	let client_dir = app.root_dir.join("client");
 	let root_dir = app.root_dir.as_path();
-	let first_jar = launch_ctx
-		.classpath_jars
-		.first()
-		.ok_or_else(|| anyhow::anyhow!("No classpath jars found"))?;
+	let first_jar = launch_ctx.classpath_jars.first().ok_or_else(|| {
+		crate::errors::YammmError::download_failed("No classpath jars found")
+	})?;
 	let mut vfs_tree = build_client_vfs(storage, &app.cache, root_dir)?;
 	extract_client_icon(first_jar, &mut vfs_tree);
 
@@ -95,10 +94,10 @@ pub async fn run(
 		&modpack.minecraft_version,
 	));
 
-	if super::java::needs_log4j_config_override(&modpack.minecraft_version) {
-		if let Ok(config_args) = super::java::write_log4j_config(&client_dir) {
-			java_args.extend(config_args);
-		}
+	if super::java::needs_log4j_config_override(&modpack.minecraft_version)
+		&& let Ok(config_args) = super::java::write_log4j_config(&client_dir)
+	{
+		java_args.extend(config_args);
 	}
 
 	if let Some(resolved) = &resolved.resolved_jvm_args {
@@ -232,28 +231,30 @@ fn build_client_vfs(
 fn extract_client_icon(
 	mc_jar: &Path,
 	tree: &mut VfsTree,
-) {
+) -> Option<()> {
 	let file = match std::fs::File::open(mc_jar) {
 		Ok(f) => f,
-		Err(_) => return,
+		Err(_) => return None,
 	};
 	let mut archive = match zip::ZipArchive::new(file) {
 		Ok(a) => a,
-		Err(_) => return,
+		Err(_) => return None,
 	};
 
 	for icon_path in &["icons/minecraft.icns", "icons/icon_128x128.png"] {
 		if let Ok(mut icon_file) = archive.by_name(icon_path) {
 			let mut buf = Vec::new();
 			if std::io::Read::read_to_end(&mut icon_file, &mut buf).is_ok() {
-				let tmp_dir = std::env::temp_dir().join("yammm-icons");
-				let _ = std::fs::create_dir_all(&tmp_dir);
-				let tmp_path = tmp_dir.join(icon_path.replace('/', "_"));
+				let icon_tmp = std::env::temp_dir()
+					.join(format!("yammm-icon-{}", std::process::id()));
+				let _ = std::fs::create_dir_all(&icon_tmp);
+				let tmp_path = icon_tmp.join(icon_path.replace('/', "_"));
 				if std::fs::write(&tmp_path, &buf).is_ok() {
 					tree.add_file(Path::new(icon_path), tmp_path);
-					return;
+					return Some(());
 				}
 			}
 		}
 	}
+	None
 }

@@ -9,7 +9,7 @@ modpack/
 │   └── ignored_configs.ron   # Ignored config file paths
 ├── mods/
 │   └── <mod-id>/
-│       ├── mod.ron           # Mod metadata
+│       ├── entry.ron         # Mod metadata
 │       ├── config/           # Common configs (client + server)
 │       ├── client/
 │       │   └── config/       # Client-only configs
@@ -21,10 +21,10 @@ modpack/
 │   └── server/               # Server-specific global files
 ├── resourcepacks/           # Per-resource-pack directories
 │   └── <pack-id>/
-│       └── pack.ron
+│       └── entry.ron
 └── shaderpacks/             # Per-shader-pack directories
     └── <pack-id>/
-        └── pack.ron
+        └── entry.ron
 ```
 
 **Note:** Downloaded files (JARs, ZIPs) are stored in the **global cache** (see [caching.md](caching.md)), not in the modpack directory.
@@ -33,9 +33,9 @@ modpack/
 
 ## Mod Storage
 
-### mod.ron
+### entry.ron
 
-Per-mod metadata in `mods/{mod-id}/mod.ron` (RON format for readability):
+Per-mod metadata in `mods/{mod-id}/entry.ron` (RON format for readability):
 
 ```ron
 (
@@ -43,48 +43,48 @@ Per-mod metadata in `mods/{mod-id}/mod.ron` (RON format for readability):
     name: "Create",
     description: "Building Tools and Aesthetic Technology",
     version: "0.5.1+m",
-    source: Modrinth(id: "DHiOCvQa"),
-    dependencies: [
-        (
-            mod_id: "fabric-api",
-            source: Modrinth(id: "P7dR8mAK"),
-            kind: required,
-        ),
-    ],
+    source: (type: "modrinth", id: "DHiOCvQa"),
+    dependencies: [],
     url: "https://modrinth.com/mod/create",
     download_url: "https://cdn.modrinth.com/data/DHiOCvQa/versions/...",
     hash: Some("abc123...456"),
     hash_type: Sha512,
     project_type: Mod,
     env: Both,
+    categories: ["technology", "aesthetic"],
+    filename: Some("create-0.5.1+m.jar"),
+    unresolved: false,
+    connector_compat: false,
 )
 ```
 
 ### Source Types in RON
 
+`ModSource` uses internally-tagged serialization (`#[serde(tag = "type", rename_all = "lowercase")]`):
+
 **Modrinth:**
 ```ron
-source: Modrinth(id: "DHiOCvQa"),
+source: (type: "modrinth", id: "DHiOCvQa"),
 ```
 
 **CurseForge:**
 ```ron
-source: CurseForge(project_id: "238222"),
+source: (type: "curseforge", project_id: "238222"),
 ```
 
 **Url:**
 ```ron
-source: Url(url: "https://example.com/mod.jar"),
+source: (type: "url", url: "https://example.com/mod.jar"),
 ```
 
 GitHub repos use the `Url` variant:
 ```ron
-source: Url(url: "https://github.com/IrisShaders/Iris"),
+source: (type: "url", url: "https://github.com/IrisShaders/Iris"),
 ```
 
 Local files use the `Url` variant with a `file://` scheme:
 ```ron
-source: Url(url: "file:///home/user/mods/my-mod.jar"),
+source: (type: "url", url: "file:///home/user/mods/my-mod.jar"),
 ```
 
 ### Fields
@@ -95,14 +95,18 @@ source: Url(url: "file:///home/user/mods/my-mod.jar"),
 | `name` | String | Human-readable mod name |
 | `description` | String | Short description |
 | `version` | String | Version number |
-| `source` | ModSource | Source and upstream ID |
-| `dependencies` | Array | List of dependencies |
+| `source` | ModSource | Source and upstream ID (internally-tagged) |
+| `dependencies` | Vec\<Dependency\> | List of dependencies |
 | `url` | String | URL to the mod page |
 | `download_url` | String | Direct download URL |
-| `hash` | Option<String> | SHA-512 hash of JAR file |
+| `hash` | Option\<String\> | SHA-512 hash of JAR file |
 | `hash_type` | HashType | Hash algorithm (Sha512 default) |
 | `project_type` | ProjectType | `Mod`, `ResourcePack`, or `Shader` |
 | `env` | ModEnv | `Both`, `Client`, or `Server` |
+| `categories` | Vec\<String\> | Category tags from the source |
+| `filename` | Option\<String\> | Original filename of the downloaded JAR |
+| `unresolved` | bool | Whether this mod's dependencies still need resolution |
+| `connector_compat` | bool | Compatibility flag for Fabric-Quilt connector |
 
 ---
 
@@ -111,19 +115,28 @@ source: Url(url: "file:///home/user/mods/my-mod.jar"),
 `Storage` in `storage/mod.rs` is the unified interface for all persistence operations:
 
 - Holds paths to `mods/`, `resourcepacks/`, and `shaderpacks/` directories
-- Dispatches load/save/remove/list to the appropriate `ModStore` based on `ProjectType`
+- Dispatches load/save/remove/list to the appropriate `EntryStore` based on `ProjectType`
 - `find_any()` searches across all three stores
-- Delegates modpack config I/O to `ModpackConfig`
+- `list_all()` lists items across all project types
+- Delegates modpack config I/O to `ManifestStore`
 
-### ModStore
+### EntryStore
 
-Each store manages `.ron` files in per-item subdirectories:
+Each store manages `entry.ron` files in per-item subdirectories:
 
-- `exists(slug)` — check if a mod is installed
-- `load(slug)` — read and parse `mod.ron`
-- `save(mod_ron)` — serialize and write `mod.ron`
-- `remove(slug)` — delete the entire mod directory
-- `list()` — scan for subdirectories containing `mod.ron`
+- `exists(id)` — check if an entry is installed
+- `load(id)` — read and parse `entry.ron`
+- `save(id, tracked_mod)` — serialize and write `entry.ron` (atomic write via .tmp + rename)
+- `remove(id)` — delete the entire entry directory
+- `list()` — scan for subdirectories containing `entry.ron`
+
+All `Storage` methods require a `ProjectType` parameter for dispatch:
+
+- `exists(project_type, id)`
+- `load(project_type, id)`
+- `save(project_type, id, tracked_mod)`
+- `remove(project_type, id)`
+- `list(project_type)`
 
 ---
 

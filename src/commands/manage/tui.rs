@@ -3,8 +3,8 @@ use crossterm::event::{
 	self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
 };
 use crossterm::terminal::{
-	disable_raw_mode, enable_raw_mode, EnterAlternateScreen,
-	LeaveAlternateScreen,
+	EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+	enable_raw_mode,
 };
 use ratatui::backend::CrosstermBackend;
 use std::io;
@@ -21,7 +21,7 @@ use super::render;
 
 pub fn run_tui(
 	storage: &Storage,
-	registry: &SourceRegistry,
+	registry: std::sync::Arc<SourceRegistry>,
 	mods: Vec<crate::types::TrackedMod>,
 	modpack_name: String,
 	modpack_version: String,
@@ -64,7 +64,7 @@ fn run_app(
 	terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
 	app: &mut ManageApp,
 	storage: &Storage,
-	registry: &SourceRegistry,
+	registry: std::sync::Arc<SourceRegistry>,
 	filters: &VersionFilters,
 	async_rx: &mut mpsc::Receiver<AsyncResult>,
 	async_tx: &mpsc::Sender<AsyncResult>,
@@ -79,7 +79,7 @@ fn run_app(
 				Event::Key(key)
 					if key.kind == KeyEventKind::Press
 						&& !handle_key(
-							app, key, storage, registry, filters, async_tx,
+							app, key, storage, &registry, filters, async_tx,
 						)? =>
 				{
 					return Ok(());
@@ -88,6 +88,9 @@ fn run_app(
 					if let Some(ref mut textarea) = app.description_textarea {
 						let _ = textarea.input(mouse);
 					}
+				}
+				Event::Mouse(mouse) => {
+					handle_mouse(app, mouse);
 				}
 				_ => {}
 			}
@@ -99,14 +102,53 @@ fn run_app(
 	}
 }
 
+fn handle_mouse(
+	app: &mut ManageApp,
+	mouse: crossterm::event::MouseEvent,
+) {
+	use crossterm::event::MouseEventKind;
+	match mouse.kind {
+		MouseEventKind::ScrollUp => match app.mode {
+			Mode::DepTree => app.dep_tree_move_up(),
+			Mode::InstallDeps => app.dep_move_up(),
+			Mode::InstallProgress => {
+				if app.dep_output_scroll > 0 {
+					app.dep_output_scroll -= 1;
+				}
+			}
+			_ => {}
+		},
+		MouseEventKind::ScrollDown => match app.mode {
+			Mode::DepTree => app.dep_tree_move_down(),
+			Mode::InstallDeps => app.dep_move_down(),
+			Mode::InstallProgress => {
+				app.dep_output_scroll += 1;
+			}
+			_ => {}
+		},
+		_ => {}
+	}
+}
+
 fn handle_key(
 	app: &mut ManageApp,
 	key: crossterm::event::KeyEvent,
 	storage: &Storage,
-	registry: &SourceRegistry,
+	registry: &std::sync::Arc<SourceRegistry>,
 	filters: &VersionFilters,
 	async_tx: &mpsc::Sender<AsyncResult>,
 ) -> Result<bool> {
+	if key.code == KeyCode::F(1) {
+		app.show_help = !app.show_help;
+		return Ok(true);
+	}
+	if app.show_help {
+		if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+			app.show_help = false;
+		}
+		return Ok(true);
+	}
+
 	match app.mode {
 		Mode::Normal => {
 			handle_normal_key(app, key, storage, registry, filters, async_tx)
@@ -116,6 +158,10 @@ fn handle_key(
 		Mode::EditDescription => handle_description_key(app, key, storage),
 		Mode::EditCategories => handle_categories_key(app, key, storage),
 		Mode::DepTree => handle_dep_tree_key(app, key),
+		Mode::InstallDeps => handle_install_deps_key(
+			app, key, storage, registry, filters, async_tx,
+		),
+		Mode::InstallProgress => handle_install_progress_key(app, key),
 		Mode::RemoveConfirm => handle_remove_key(app, key, storage),
 		Mode::UpdateCheck => handle_update_key(app, key, storage),
 	}
@@ -125,7 +171,7 @@ fn handle_normal_key(
 	app: &mut ManageApp,
 	key: crossterm::event::KeyEvent,
 	storage: &Storage,
-	registry: &SourceRegistry,
+	registry: &std::sync::Arc<SourceRegistry>,
 	filters: &VersionFilters,
 	async_tx: &mpsc::Sender<AsyncResult>,
 ) -> Result<bool> {
@@ -164,7 +210,7 @@ fn handle_detail_focus_key(
 	app: &mut ManageApp,
 	key: crossterm::event::KeyEvent,
 	storage: &Storage,
-	registry: &SourceRegistry,
+	registry: &std::sync::Arc<SourceRegistry>,
 	filters: &VersionFilters,
 	async_tx: &mpsc::Sender<AsyncResult>,
 ) -> Result<bool> {
@@ -214,7 +260,7 @@ fn handle_detail_focus_key(
 fn activate_selected_field(
 	app: &mut ManageApp,
 	storage: &Storage,
-	registry: &SourceRegistry,
+	registry: &std::sync::Arc<SourceRegistry>,
 	filters: &VersionFilters,
 	async_tx: &mpsc::Sender<AsyncResult>,
 ) {
@@ -299,10 +345,10 @@ fn handle_description_key(
 				| crossterm::event::KeyModifiers::SHIFT,
 		) && key.code == KeyCode::Char('V')
 		{
-			if let Ok(mut cb) = arboard::Clipboard::new() {
-				if let Ok(text) = cb.get_text() {
-					textarea.insert_str(text);
-				}
+			if let Ok(mut cb) = arboard::Clipboard::new()
+				&& let Ok(text) = cb.get_text()
+			{
+				textarea.insert_str(text);
 			}
 			return Ok(true);
 		}
@@ -313,10 +359,10 @@ fn handle_description_key(
 		{
 			textarea.copy();
 			let text = textarea.yank_text();
-			if !text.is_empty() {
-				if let Ok(mut cb) = arboard::Clipboard::new() {
-					let _ = cb.set_text(text);
-				}
+			if !text.is_empty()
+				&& let Ok(mut cb) = arboard::Clipboard::new()
+			{
+				let _ = cb.set_text(text);
 			}
 			return Ok(true);
 		}
@@ -338,7 +384,8 @@ fn handle_categories_key(
 				app.category_new_input.clear();
 			}
 			KeyCode::Enter => {
-				app.add_new_category(&app.category_new_input.clone());
+				let input = app.category_new_input.clone();
+				app.add_new_category(&input);
 				app.category_new_mode = false;
 				app.category_new_input.clear();
 			}
@@ -387,8 +434,70 @@ fn handle_dep_tree_key(
 	app: &mut ManageApp,
 	key: crossterm::event::KeyEvent,
 ) -> Result<bool> {
-	if key.code == KeyCode::Esc {
-		app.mode = Mode::Normal;
+	match key.code {
+		KeyCode::Esc => app.mode = Mode::Normal,
+		KeyCode::Up => app.dep_tree_move_up(),
+		KeyCode::Down => app.dep_tree_move_down(),
+		KeyCode::Char('i') => {
+			let has_missing = app.dep_entries.iter().any(|e| !e.installed);
+			if has_missing {
+				app.start_install_deps();
+			}
+		}
+		_ => {}
+	}
+	Ok(true)
+}
+
+fn handle_install_progress_key(
+	app: &mut ManageApp,
+	key: crossterm::event::KeyEvent,
+) -> Result<bool> {
+	match key.code {
+		KeyCode::Esc | KeyCode::Enter => {
+			app.mode = Mode::DepTree;
+		}
+		KeyCode::Up => {
+			if app.dep_output_scroll > 0 {
+				app.dep_output_scroll -= 1;
+			}
+		}
+		KeyCode::Down => {
+			app.dep_output_scroll += 1;
+		}
+		_ => {}
+	}
+	Ok(true)
+}
+
+fn handle_install_deps_key(
+	app: &mut ManageApp,
+	key: crossterm::event::KeyEvent,
+	storage: &Storage,
+	registry: &std::sync::Arc<SourceRegistry>,
+	filters: &VersionFilters,
+	async_tx: &mpsc::Sender<AsyncResult>,
+) -> Result<bool> {
+	if app.dep_installing {
+		return Ok(true);
+	}
+	match key.code {
+		KeyCode::Up => app.dep_move_up(),
+		KeyCode::Down => app.dep_move_down(),
+		KeyCode::Char(' ') => app.dep_toggle_mark(),
+		KeyCode::Char('a') => app.dep_toggle_all(),
+		KeyCode::Enter => {
+			if !app.dep_marked.is_empty() {
+				app.dep_installing = true;
+				app.dep_output = vec!["Installing...".to_string()];
+				app.dep_output_scroll = 0;
+				app.mode = Mode::InstallProgress;
+				app.pending_async = Some(AsyncOp::InstallDeps);
+				spawn_install_deps(app, registry, filters, storage, async_tx);
+			}
+		}
+		KeyCode::Esc => app.mode = Mode::DepTree,
+		_ => {}
 	}
 	Ok(true)
 }
@@ -433,7 +542,7 @@ fn handle_update_key(
 
 fn spawn_fetch_versions(
 	app: &ManageApp,
-	registry: &SourceRegistry,
+	registry: &std::sync::Arc<SourceRegistry>,
 	filters: &VersionFilters,
 	tx: &mpsc::Sender<AsyncResult>,
 ) {
@@ -457,13 +566,15 @@ fn spawn_fetch_versions(
 	tokio::spawn(async move {
 		let result = provider.get_versions(&source_id, &filters).await;
 		let mapped = result.map_err(|e| e.to_string());
-		let _ = tx.send(AsyncResult::Versions(mapped)).await;
+		if tx.send(AsyncResult::Versions(mapped)).await.is_err() {
+			tracing::debug!("TUI receiver dropped before version result");
+		};
 	});
 }
 
 fn spawn_update_check(
 	app: &ManageApp,
-	registry: &SourceRegistry,
+	registry: &std::sync::Arc<SourceRegistry>,
 	filters: &VersionFilters,
 	tx: &mpsc::Sender<AsyncResult>,
 ) {
@@ -501,9 +612,15 @@ fn spawn_update_check(
 						hash: latest.hash,
 						hash_type: latest.hash_type,
 					};
-					let _ = tx
+					if tx
 						.send(AsyncResult::UpdateCheck(Ok(Some(update))))
-						.await;
+						.await
+						.is_err()
+					{
+						tracing::debug!(
+							"TUI receiver dropped before update result"
+						);
+					}
 				} else {
 					let _ = tx.send(AsyncResult::UpdateCheck(Ok(None))).await;
 				}
@@ -512,6 +629,90 @@ fn spawn_update_check(
 				let _ =
 					tx.send(AsyncResult::UpdateCheck(Err(e.to_string()))).await;
 			}
+		}
+	});
+}
+
+fn spawn_install_deps(
+	app: &mut ManageApp,
+	registry: &std::sync::Arc<SourceRegistry>,
+	filters: &VersionFilters,
+	storage: &Storage,
+	tx: &mpsc::Sender<AsyncResult>,
+) {
+	if app.pending_async != Some(AsyncOp::InstallDeps) {
+		return;
+	}
+
+	let marked: Vec<(String, crate::types::ModSource)> = app
+		.dep_entries
+		.iter()
+		.filter(|e| !e.installed && app.dep_marked.contains(&e.mod_id))
+		.map(|e| (e.mod_id.clone(), e.source.clone()))
+		.collect();
+
+	if marked.is_empty() {
+		app.dep_installing = false;
+		app.pending_async = None;
+		return;
+	}
+
+	let registry = registry.clone();
+	let mc_version = filters.minecraft_version.clone();
+	let loader = filters.loader;
+
+	let root_dir = storage
+		.modpack_path
+		.parent()
+		.map(|p| p.to_path_buf())
+		.unwrap_or_default();
+	let config = storage.load_modpack().unwrap_or_default();
+	let tx = tx.clone();
+
+	crate::output::start_capture();
+	tokio::spawn(async move {
+		let storage = crate::storage::Storage::new(&root_dir, &config);
+
+		let mut installed = Vec::new();
+		let mut errors = Vec::new();
+
+		for (mod_id, source) in &marked {
+			let add_ctx = crate::commands::add::sources::AddContext {
+				source,
+				version_req: None,
+				force: false,
+				storage: &storage,
+				mc_version: mc_version.as_deref(),
+				loader,
+				registry: registry.clone(),
+				env_override: None,
+				project_type_override: None,
+				categories: Vec::new(),
+			};
+
+			match add_ctx.add(mod_id).await {
+				Ok(_) => installed.push(mod_id.clone()),
+				Err(e) => errors.push(format!("{}: {}", mod_id, e)),
+			}
+		}
+
+		let captured = crate::output::stop_capture();
+
+		if errors.is_empty() {
+			if tx
+				.send(AsyncResult::InstallDeps(Ok(installed)))
+				.await
+				.is_err()
+			{
+				tracing::debug!("TUI receiver dropped before install result");
+			}
+		} else {
+			let mut output = captured;
+			output.push(String::new());
+			output.extend(errors.iter().cloned());
+			let _ = tx
+				.send(AsyncResult::InstallDeps(Err(output.join("\n"))))
+				.await;
 		}
 	});
 }
@@ -542,6 +743,10 @@ fn handle_async_result(
 			}
 		}
 		AsyncResult::UpdateCheck(update_result) => {
+			if app.mode == Mode::InstallDeps || app.mode == Mode::DepTree {
+				app.dep_installing = false;
+				app.pending_async = None;
+			}
 			if app.mode == Mode::UpdateCheck {
 				app.update_loading = false;
 				match update_result {
@@ -551,6 +756,40 @@ fn handle_async_result(
 					Err(e) => {
 						app.update_error = Some(e);
 						app.pending_async = None;
+					}
+				}
+			}
+		}
+		AsyncResult::InstallDeps(install_result) => {
+			if app.mode == Mode::InstallProgress {
+				app.dep_installing = false;
+				app.pending_async = None;
+				app.dep_output_scroll = 0;
+				match install_result {
+					Ok(installed) => {
+						let count = installed.len();
+						for mod_id in &installed {
+							app.dep_marked.remove(mod_id);
+						}
+						app.dep_output = vec![format!(
+							"Successfully installed {} dep(s).",
+							count
+						)];
+						app.set_status(
+							StatusKind::Success,
+							format!("Installed {} dep(s)", count),
+						);
+					}
+					Err(output) => {
+						app.dep_output = if output.is_empty() {
+							vec!["Install failed.".to_string()]
+						} else {
+							output.lines().map(String::from).collect()
+						};
+						app.set_status(
+							StatusKind::Error,
+							"Install failed".to_string(),
+						);
 					}
 				}
 			}

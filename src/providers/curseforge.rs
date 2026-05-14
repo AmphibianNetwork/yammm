@@ -15,17 +15,21 @@
 
 use std::sync::Arc;
 
-use crate::api::error::ApiError;
 use crate::api::CurseForgeClient;
+use crate::api::error::ApiError;
 use crate::providers::provider::{ModSourceProvider, SearchFilters};
-use crate::types::{ModInfo, ModVersion, SourceDependency, VersionFilters};
+use crate::types::{
+	ModEnv, ModInfo, ModVersion, SourceDependency, VersionFilters,
+};
 use anyhow::Result;
 
 /// Log a warning when rate-limited, suggesting the user add an API key
 /// for higher rate limits (unauthenticated access is heavily throttled).
 fn log_rate_limit_warning(err: &ApiError) {
 	if err.is_rate_limited() {
-		tracing::warn!("CurseForge API rate limited. Consider setting api_keys.curseforge in your config for higher rate limits.");
+		tracing::warn!(
+			"CurseForge API rate limited. Consider setting api_keys.curseforge in your config for higher rate limits."
+		);
 	}
 }
 
@@ -87,6 +91,13 @@ impl ModSourceProvider for CurseForgeSource {
 
 	fn supports_search(&self) -> bool {
 		true
+	}
+
+	fn get_mod_env(
+		&self,
+		_mod_info: &ModInfo,
+	) -> ModEnv {
+		ModEnv::Both
 	}
 
 	async fn search(
@@ -208,5 +219,40 @@ impl ModSourceProvider for CurseForgeSource {
 		}
 
 		Ok(CurseForgeClient::to_source_dependencies(&file))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_parse_numeric_id_valid() {
+		assert_eq!(
+			CurseForgeSource::parse_numeric_id("231093", "project").unwrap(),
+			231093
+		);
+	}
+
+	#[test]
+	fn test_parse_numeric_id_invalid() {
+		assert!(
+			CurseForgeSource::parse_numeric_id("sodium", "project").is_err()
+		);
+	}
+
+	#[test]
+	fn test_require_api_key_present() {
+		let source = CurseForgeSource::new(
+			Some("test-key".to_string()),
+			reqwest::Client::new(),
+		);
+		assert!(source.require_api_key("test").is_ok());
+	}
+
+	#[test]
+	fn test_require_api_key_absent() {
+		let source = CurseForgeSource::new(None, reqwest::Client::new());
+		assert!(source.require_api_key("test").is_err());
 	}
 }

@@ -1,7 +1,7 @@
 //! Adoptium/Temurin JDK client for downloading and extracting JDK runtimes.
 
-use crate::api::error::ApiError;
 use crate::api::ApiClient;
+use crate::api::error::ApiError;
 use anyhow::Result;
 use serde::Deserialize;
 use std::path::Path;
@@ -29,16 +29,16 @@ impl AdoptiumClient {
 		}
 
 		// On macOS ARM, fall back to x64 via Rosetta 2
-		if cfg!(target_os = "macos") && arch == "aarch64" {
-			if let Some(asset) =
+		if cfg!(target_os = "macos")
+			&& arch == "aarch64"
+			&& let Some(asset) =
 				self.try_fetch_jdk(major_version, os, "x64").await?
-			{
-				output::warning(format!(
-					"No JDK {} for ARM, using x64 via Rosetta 2",
-					major_version
-				));
-				return Ok(asset);
-			}
+		{
+			output::warning(format!(
+				"No JDK {} for ARM, using x64 via Rosetta 2",
+				major_version
+			));
+			return Ok(asset);
 		}
 
 		Err(ApiError::not_found(format!(
@@ -213,19 +213,36 @@ fn extract_zip(
 ) -> Result<()> {
 	let file = std::fs::File::open(archive_path)?;
 	let mut archive = zip::ZipArchive::new(file)?;
+	let dest_dir_canonical = dest_dir
+		.canonicalize()
+		.unwrap_or_else(|_| dest_dir.to_path_buf());
 
 	for i in 0..archive.len() {
 		let mut entry = archive.by_index(i)?;
-		let name = entry
-			.enclosed_name()
-			.map(|p| p.to_string_lossy().to_string())
-			.unwrap_or_default();
+		let enclosed = match entry.enclosed_name() {
+			Some(p) => p,
+			None => continue,
+		};
 
-		if name.is_empty() {
+		if enclosed.as_os_str().is_empty() {
 			continue;
 		}
 
-		let out_path = dest_dir.join(&name);
+		let out_path = dest_dir.join(&enclosed);
+
+		let out_path_canonical = out_path
+			.parent()
+			.and_then(|p| p.canonicalize().ok())
+			.and_then(|p| out_path.file_name().map(|n| p.join(n)))
+			.unwrap_or_else(|| out_path.clone());
+
+		if !out_path_canonical.starts_with(&dest_dir_canonical) {
+			tracing::warn!(
+				"Skipping zip entry outside destination: {}",
+				enclosed.display()
+			);
+			continue;
+		}
 
 		if entry.is_dir() {
 			std::fs::create_dir_all(&out_path)?;

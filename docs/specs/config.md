@@ -6,7 +6,7 @@ yammm uses two configuration files:
 1. **Global config** (`~/.config/yammm/config.toml`): User preferences and API keys
 2. **Modpack config** (`modpack.toml`): Minecraft version, loader, modpack metadata
 
-Mods, resource packs, and shader packs are tracked in individual `.ron` files, not in `modpack.toml`. See [storage.md](storage.md).
+Mods, resource packs, and shader packs are tracked in individual `entry.ron` files, not in `modpack.toml`. See [storage.md](storage.md).
 
 ---
 
@@ -25,17 +25,15 @@ Override with `YAMMM_CONFIG` environment variable.
 ### Schema
 
 ```toml
-default_modpack_dir = ""
-cache_dir = ""
-cache_max_size_mb = 5000
-
 [api_keys]
-curseforge = ""
+curseforge = "your-api-key"
 
 [output]
 format = "table"
 color = true
 ```
+
+All fields are optional. Omitted fields use defaults. `Option<T>` fields are `None` when absent from the file.
 
 ### Fields
 
@@ -43,22 +41,23 @@ color = true
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `default_modpack_dir` | string | `""` | Default directory for modpack operations |
-| `cache_dir` | string | `""` | Custom cache directory (platform default if empty) |
-| `cache_max_size_mb` | integer | `5000` | Maximum cache size in MB (0 = unlimited) |
+| `cache_dir` | Option\<PathBuf\> | `None` | Custom cache directory (platform default if absent) |
+| `cache_max_size_mb` | Option\<u64\> | `None` (effectively 5000) | Maximum cache size in MB (0 = unlimited) |
+| `max_concurrent_downloads` | Option\<usize\> | `None` (effectively 8) | Maximum concurrent download tasks |
+| `default_modpack_dir` | Option\<PathBuf\> | `None` | Default directory for modpack operations |
 
 #### `[api_keys]` Section
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `curseforge` | string | `""` | CurseForge API key (required for CurseForge operations) |
+| `curseforge` | Option\<String\> | `None` | CurseForge API key (required for CurseForge operations) |
 
 #### `[output]` Section
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `format` | string | `"table"` | Output format: `table`, `compact`, `json` |
-| `color` | boolean | `true` | Enable colored output |
+| `format` | OutputFormat | `"table"` | Output format: `table`, `compact`, `json` |
+| `color` | bool | `true` | Enable colored output |
 
 ### Environment Variables
 
@@ -98,21 +97,24 @@ version = "0.15.11"
 | `description` | string | No | `""` | Modpack description |
 | `version` | string | No | `""` | Modpack version (used during export) |
 | `minecraft_version` | string | No | `""` | Target Minecraft version (e.g., `1.20.4`) |
-| `mod_path` | string | No | `None` | Custom mods directory path (defaults to `mods/`) |
+| `mod_path` | Option\<PathBuf\> | No | `None` | Custom mods directory path (defaults to `mods/`) |
+| `resource_pack_path` | Option\<PathBuf\> | No | `None` | Custom resource packs directory path (defaults to `resourcepacks/`) |
+| `shader_pack_path` | Option\<PathBuf\> | No | `None` | Custom shader packs directory path (defaults to `shaderpacks/`) |
 
 #### `[loader]` Section
 
 | Field | Type | Required | Default | Description |
 |-------|------|---------|---------|-------------|
-| `loader` | string | No | `""` | Loader type: `fabric`, `forge`, `neoforge`, `quilt` |
+| `loader` | Option\<LoaderType\> | No | `None` (defaults to Fabric at runtime) | Loader type: `fabric`, `forge`, `neoforge`, `quilt` |
 | `version` | string | No | `""` | Loader version string |
 
 ### Notes
 
-- `modpack.toml` only contains **modpack-wide** settings. Individual mods, resource packs, and shader packs are tracked in their respective `.ron` files.
+- `modpack.toml` only contains **modpack-wide** settings. Individual mods, resource packs, and shader packs are tracked in their respective `entry.ron` files.
 - `minecraft_version` is a top-level field (not nested under `[minecraft]`).
-- The `loader` field inside `[loader]` uses the key name `loader` (not `type`).
+- The `loader` field inside `[loader]` is an enum (`LoaderType`), not a plain string. In TOML it serializes as a lowercase string.
 - Downloaded JARs are stored in the **global cache**, not in the modpack directory.
+- `LoaderConfig::loader_or_default()` returns the configured loader or defaults to Fabric.
 
 ---
 
@@ -127,13 +129,13 @@ my-modpack/
 │   └── ignored_configs.ron  # Ignored config file paths
 ├── mods/                 # Mod metadata directories
 │   └── {mod-id}/
-│       └── mod.ron       # Per-mod metadata (source, version, hash, dependencies)
+│       └── entry.ron     # Per-mod metadata (source, version, hash, dependencies)
 ├── resourcepacks/       # Resource pack metadata directories
 │   └── {pack-id}/
-│       └── pack.ron
+│       └── entry.ron
 ├── shaderpacks/         # Shader pack metadata directories
 │   └── {pack-id}/
-│       └── pack.ron
+│       └── entry.ron
 ├── config/               # Fallback config files
 ├── resources/
 │   ├── client/           # Client-specific global files (options.txt, etc.)

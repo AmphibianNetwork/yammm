@@ -18,8 +18,8 @@ use super::CliSource;
 use crate::app::AppContext;
 use crate::output;
 use crate::services::deps_install::{
-	categorize_deps, prompt_and_install_deps, record_dep_edges,
-	DepInstallContext,
+	DepInstallContext, categorize_deps, prompt_and_install_deps,
+	record_dep_edges,
 };
 use crate::services::resolver::DependencyResolver;
 use crate::types::{LoaderType, ModEnv, ModSource, ProjectType};
@@ -107,9 +107,9 @@ impl AddCommand {
 			add_ctx.add(&self.identifier).await?;
 
 		let install_ctx = DepInstallContext {
-			storage,
+			storage: std::sync::Arc::new((*storage).clone()),
 			registry: add_ctx.registry.clone(),
-			mc_version: minecraft_version,
+			mc_version: minecraft_version.map(String::from),
 			loader,
 		};
 
@@ -132,12 +132,11 @@ impl AddCommand {
 	/// have a provider that can return dependency information.
 	async fn resolve_dependencies(
 		&self,
-		ctx: &DepInstallContext<'_>,
+		ctx: &DepInstallContext,
 		main_slug: &str,
 		main_project_type: ProjectType,
 		resolved_source: &ModSource,
 	) -> anyhow::Result<()> {
-		// URL-based mods don't have a provider that can resolve dependencies.
 		if resolved_source.url_str().is_some() {
 			return Ok(());
 		}
@@ -145,8 +144,9 @@ impl AddCommand {
 
 		let mut resolver = DependencyResolver::new(ctx.registry.clone());
 
-		if let Some(minecraft_version) = ctx.mc_version {
-			resolver = resolver.with_minecraft_version(minecraft_version);
+		if let Some(ref minecraft_version) = ctx.mc_version {
+			resolver =
+				resolver.with_minecraft_version(minecraft_version.as_str());
 		}
 
 		if let Some(loader) = ctx.loader {
@@ -168,7 +168,7 @@ impl AddCommand {
 		let categorized = categorize_deps(
 			resolved_mods,
 			std::slice::from_ref(&mod_id),
-			ctx.storage,
+			&ctx.storage,
 		);
 
 		crate::services::deps_install::present_incompatible_warnings(
@@ -200,7 +200,7 @@ impl AddCommand {
 		}
 
 		record_dep_edges(
-			ctx.storage,
+			&ctx.storage,
 			main_project_type,
 			main_slug,
 			&categorized.dep_entries,

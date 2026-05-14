@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::api::error::ApiError;
 use crate::api::ApiClient;
+use crate::api::error::ApiError;
 
 const MINECRAFT_META_URL: &str = "https://piston-meta.mojang.com";
 const MAX_CONCURRENT_ASSET_DOWNLOADS: usize = 16;
@@ -79,7 +79,12 @@ impl MinecraftClient {
 			});
 		}
 
-		std::fs::write(&dest, &bytes)?;
+		let dest_clone = dest.clone();
+		tokio::task::spawn_blocking(move || {
+			std::fs::write(&dest_clone, &bytes)
+		})
+		.await
+		.map_err(|e| ApiError::Network(e.to_string()))??;
 
 		Ok(dest)
 	}
@@ -145,7 +150,6 @@ impl MinecraftClient {
 				let _permit = permit;
 				let prefix = &object.hash[..2];
 				let obj_dir = objects_dir.join(prefix);
-				std::fs::create_dir_all(&obj_dir)?;
 				let url = format!(
 					"https://resources.download.minecraft.net/{}/{}",
 					prefix, object.hash
@@ -168,7 +172,12 @@ impl MinecraftClient {
 					});
 				}
 				let obj_path = obj_dir.join(&object.hash);
-				std::fs::write(&obj_path, &bytes)?;
+				tokio::task::spawn_blocking(move || {
+					std::fs::create_dir_all(&obj_dir)?;
+					std::fs::write(&obj_path, &bytes)
+				})
+				.await
+				.map_err(|e| ApiError::Network(e.to_string()))??;
 				Ok(name)
 			});
 
@@ -367,6 +376,40 @@ pub struct VersionArguments {
 }
 
 /// Resolves JVM arguments from the MC version info for the current platform.
+/// Evaluates conditional rules and extracts string values from a JSON
+/// arguments array (used for both `arguments.jvm` and `arguments.game`).
+///
+/// Each entry is either a plain string or an object with `rules` + `value`.
+/// Rules are evaluated against the current platform; matching values are
+/// collected and returned.
+pub fn resolve_args_array(entries: &[serde_json::Value]) -> Vec<String> {
+	let mut args = Vec::new();
+	for entry in entries {
+		let values = match entry {
+			serde_json::Value::String(s) => vec![s.clone()],
+			serde_json::Value::Object(obj) => {
+				let Some(rules) = obj.get("rules") else {
+					continue;
+				};
+				if !evaluate_rules(rules) {
+					continue;
+				}
+				match obj.get("value") {
+					Some(serde_json::Value::String(s)) => vec![s.clone()],
+					Some(serde_json::Value::Array(arr)) => arr
+						.iter()
+						.filter_map(|v| v.as_str().map(String::from))
+						.collect(),
+					_ => continue,
+				}
+			}
+			_ => continue,
+		};
+		args.extend(values);
+	}
+	args
+}
+
 /// Evaluates conditional rules, substitutes variables, and filters out
 /// `-cp`/`${classpath}`/`${main_class}` entries (handled separately by the launcher).
 pub fn resolve_mc_jvm_args(
@@ -378,43 +421,21 @@ pub fn resolve_mc_jvm_args(
 	let mut args = Vec::new();
 
 	if let Some(ref arguments) = version_info.arguments {
-		for entry in &arguments.jvm {
-			let values = match entry {
-				serde_json::Value::String(s) => vec![s.clone()],
-				serde_json::Value::Object(obj) => {
-					let Some(rules) = obj.get("rules") else {
-						continue;
-					};
-					if !evaluate_rules(rules) {
-						continue;
-					}
-					match obj.get("value") {
-						Some(serde_json::Value::String(s)) => vec![s.clone()],
-						Some(serde_json::Value::Array(arr)) => arr
-							.iter()
-							.filter_map(|v| v.as_str().map(String::from))
-							.collect(),
-						_ => continue,
-					}
-				}
-				_ => continue,
-			};
-
-			for value in values {
-				if value == "-cp"
-					|| value == "${classpath}"
-					|| value == "${main_class}"
-				{
-					continue;
-				}
-				let resolved = substitute_jvm_vars(
-					&value,
-					natives_dir,
-					library_dir,
-					version_name,
-				);
-				args.push(resolved);
+		let raw = resolve_args_array(&arguments.jvm);
+		for value in raw {
+			if value == "-cp"
+				|| value == "${classpath}"
+				|| value == "${main_class}"
+			{
+				continue;
 			}
+			let resolved = substitute_jvm_vars(
+				&value,
+				natives_dir,
+				library_dir,
+				version_name,
+			);
+			args.push(resolved);
 		}
 	} else if let Some(ref mc_args) = version_info.minecraft_arguments {
 		for arg in mc_args.split_whitespace() {
@@ -442,35 +463,11 @@ pub fn resolve_mc_jvm_args(
 
 /// Resolves game arguments from the MC version info for the current platform.
 pub fn resolve_mc_game_args(version_info: &VersionInfo) -> Vec<String> {
-	let mut args = Vec::new();
-
 	if let Some(ref arguments) = version_info.arguments {
-		for entry in &arguments.game {
-			let values = match entry {
-				serde_json::Value::String(s) => vec![s.clone()],
-				serde_json::Value::Object(obj) => {
-					let Some(rules) = obj.get("rules") else {
-						continue;
-					};
-					if !evaluate_rules(rules) {
-						continue;
-					}
-					match obj.get("value") {
-						Some(serde_json::Value::String(s)) => vec![s.clone()],
-						Some(serde_json::Value::Array(arr)) => arr
-							.iter()
-							.filter_map(|v| v.as_str().map(String::from))
-							.collect(),
-						_ => continue,
-					}
-				}
-				_ => continue,
-			};
-			args.extend(values);
-		}
+		resolve_args_array(&arguments.game)
+	} else {
+		Vec::new()
 	}
-
-	args
 }
 
 pub fn evaluate_rules(rules: &serde_json::Value) -> bool {
@@ -504,10 +501,11 @@ fn match_os_rule(os_rule: Option<&serde_json::Value>) -> bool {
 			return false;
 		}
 	}
-	if let Some(arch) = os.get("arch").and_then(|a| a.as_str()) {
-		if arch == "x86" && !cfg!(target_arch = "x86") {
-			return false;
-		}
+	if let Some(arch) = os.get("arch").and_then(|a| a.as_str())
+		&& arch == "x86"
+		&& !cfg!(target_arch = "x86")
+	{
+		return false;
 	}
 	true
 }

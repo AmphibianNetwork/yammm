@@ -47,7 +47,7 @@ impl ManageCommand {
 
 		tui::run_tui(
 			&app.storage,
-			&ctx.registry,
+			ctx.registry.clone(),
 			all_items,
 			modpack_name,
 			modpack_version,

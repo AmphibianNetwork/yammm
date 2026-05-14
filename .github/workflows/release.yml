@@ -238,8 +238,8 @@ jobs:
           VERSION_NUM="${VERSION#v}"
 
           # Find the per-arch archives
-          X86_ARCHIVE=$(find target/distrib -name "yammm-${VERSION_NUM}-x86_64-apple-darwin.tar.xz" | head -1)
-          ARM_ARCHIVE=$(find target/distrib -name "yammm-${VERSION_NUM}-aarch64-apple-darwin.tar.xz" | head -1)
+          X86_ARCHIVE=$(find target/distrib -name "yammm-${VERSION_NUM}-x86_64-apple-darwin.tar.gz" | head -1)
+          ARM_ARCHIVE=$(find target/distrib -name "yammm-${VERSION_NUM}-aarch64-apple-darwin.tar.gz" | head -1)
 
           if [ -z "$X86_ARCHIVE" ] || [ -z "$ARM_ARCHIVE" ]; then
             echo "Could not find per-arch macOS archives, skipping universal binary"
@@ -267,14 +267,14 @@ jobs:
           # Create the universal archive
           mkdir -p target/distrib
           cd /tmp/yammm-universal
-          tar -cJf "${GITHUB_WORKSPACE}/target/distrib/yammm-${VERSION_NUM}-universal-apple-darwin.tar.xz" *
+          tar -czf "${GITHUB_WORKSPACE}/target/distrib/yammm-${VERSION_NUM}-universal-apple-darwin.tar.gz" *
 
           echo "Universal binary created successfully"
       - name: Upload universal binary
         uses: actions/upload-artifact@v6
         with:
           name: artifacts-macos-universal
-          path: target/distrib/yammm-*.tar.xz
+          path: target/distrib/yammm-*.tar.gz
 
   # Build .deb and .rpm packages for Linux
   build-linux-packages:

@@ -45,7 +45,18 @@ impl ManifestStore {
 		}
 		let contents = toml::to_string_pretty(config)
 			.context("Failed to serialize modpack config")?;
-		std::fs::write(&self.path, contents)
+		atomic_write(&self.path, &contents)
 			.context("Failed to write modpack.toml")
 	}
+}
+
+fn atomic_write(
+	path: &Path,
+	contents: &str,
+) -> std::io::Result<()> {
+	let tmp_path = path.with_extension("tmp");
+	std::fs::write(&tmp_path, contents)?;
+	std::fs::rename(&tmp_path, path).inspect_err(|_| {
+		let _ = std::fs::remove_file(&tmp_path);
+	})
 }

@@ -40,6 +40,16 @@ impl ModSourceProvider for ModrinthSource {
 		true
 	}
 
+	fn get_mod_env(
+		&self,
+		mod_info: &ModInfo,
+	) -> ModEnv {
+		mod_env_from_modrinth_sides(
+			mod_info.client_side.as_deref(),
+			mod_info.server_side.as_deref(),
+		)
+	}
+
 	async fn search(
 		&self,
 		query: &str,
@@ -74,10 +84,18 @@ impl ModSourceProvider for ModrinthSource {
 		mod_id: &str,
 	) -> Result<ModInfo> {
 		let hit = self.client.get_mod(mod_id).await.map_err(|e| {
-			crate::errors::YammmError::mod_not_found(format!(
-				"Mod not found: {} ({})",
-				mod_id, e
-			))
+			let msg = format!("{}", e);
+			if msg.contains("404") || msg.contains("not found") {
+				crate::errors::YammmError::mod_not_found(format!(
+					"Mod not found: {}",
+					mod_id
+				))
+			} else {
+				crate::errors::YammmError::network_error(format!(
+					"Failed to fetch mod {}: {}",
+					mod_id, e
+				))
+			}
 		})?;
 		Ok(ModrinthClient::to_mod_info_from_hit(hit))
 	}
@@ -97,8 +115,8 @@ impl ModSourceProvider for ModrinthSource {
 			)
 			.await
 			.map_err(|e| {
-				crate::errors::YammmError::mod_not_found(format!(
-					"Versions not found for {}: {}",
+				crate::errors::YammmError::network_error(format!(
+					"Failed to fetch versions for {}: {}",
 					mod_id, e
 				))
 			})?;
@@ -176,7 +194,7 @@ fn matches_loader(
 ///
 /// Modrinth uses `"required"`, `"optional"`, `"unsupported"` for each side.
 /// This maps those semantics to our `ModEnv` enum.
-pub fn mod_env_from_modrinth_sides(
+pub(crate) fn mod_env_from_modrinth_sides(
 	client_side: Option<&str>,
 	server_side: Option<&str>,
 ) -> ModEnv {
@@ -191,5 +209,120 @@ pub fn mod_env_from_modrinth_sides(
 			ModEnv::Server
 		}
 		_ => ModEnv::Both,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn make_hit(
+		versions: Vec<&str>,
+		categories: Vec<&str>,
+	) -> crate::api::ModrinthSearchHit {
+		crate::api::ModrinthSearchHit {
+			project_id: String::new(),
+			project_type: String::new(),
+			slug: String::new(),
+			author: String::new(),
+			title: String::new(),
+			description: String::new(),
+			categories: categories.into_iter().map(String::from).collect(),
+			display_categories: Vec::new(),
+			versions: versions.into_iter().map(String::from).collect(),
+			downloads: 0,
+			follows: 0,
+			icon_url: None,
+			date_created: String::new(),
+			date_modified: String::new(),
+			latest_version: None,
+			license: String::new(),
+			client_side: None,
+			server_side: None,
+		}
+	}
+
+	#[test]
+	fn test_mod_env_both_required() {
+		assert_eq!(
+			mod_env_from_modrinth_sides(Some("required"), Some("required")),
+			ModEnv::Both
+		);
+	}
+
+	#[test]
+	fn test_mod_env_client_only() {
+		assert_eq!(
+			mod_env_from_modrinth_sides(Some("required"), Some("unsupported")),
+			ModEnv::Client
+		);
+		assert_eq!(
+			mod_env_from_modrinth_sides(Some("required"), Some("optional")),
+			ModEnv::Client
+		);
+	}
+
+	#[test]
+	fn test_mod_env_server_only() {
+		assert_eq!(
+			mod_env_from_modrinth_sides(Some("unsupported"), Some("required")),
+			ModEnv::Server
+		);
+		assert_eq!(
+			mod_env_from_modrinth_sides(Some("optional"), Some("required")),
+			ModEnv::Server
+		);
+	}
+
+	#[test]
+	fn test_mod_env_defaults_to_both() {
+		assert_eq!(mod_env_from_modrinth_sides(None, None), ModEnv::Both);
+		assert_eq!(
+			mod_env_from_modrinth_sides(Some("optional"), Some("optional")),
+			ModEnv::Both
+		);
+		assert_eq!(
+			mod_env_from_modrinth_sides(
+				Some("unsupported"),
+				Some("unsupported")
+			),
+			ModEnv::Both
+		);
+	}
+
+	#[test]
+	fn test_matches_minecraft_version_none_passes() {
+		let hit = make_hit(vec!["1.20.4"], vec![]);
+		assert!(matches_minecraft_version(&hit, None));
+	}
+
+	#[test]
+	fn test_matches_minecraft_version_exact() {
+		let hit = make_hit(vec!["1.20.4"], vec![]);
+		assert!(matches_minecraft_version(&hit, Some("1.20.4")));
+		assert!(!matches_minecraft_version(&hit, Some("1.21")));
+	}
+
+	#[test]
+	fn test_matches_minecraft_version_segment() {
+		let hit = make_hit(vec!["1.20.4+build.1"], vec![]);
+		assert!(matches_minecraft_version(&hit, Some("1")));
+		assert!(matches_minecraft_version(&hit, Some("20")));
+		assert!(matches_minecraft_version(&hit, Some("4")));
+		assert!(!matches_minecraft_version(&hit, Some("21")));
+	}
+
+	#[test]
+	fn test_matches_loader_case_insensitive() {
+		let hit = make_hit(vec![], vec!["fabric"]);
+		assert!(matches_loader(&hit, Some("fabric")));
+		assert!(matches_loader(&hit, Some("Fabric")));
+		assert!(!matches_loader(&hit, Some("forge")));
+	}
+
+	#[test]
+	fn test_matches_loader_none_passes() {
+		let hit = make_hit(vec![], vec![]);
+		assert!(matches_loader(&hit, None));
 	}
 }

@@ -2,23 +2,105 @@
 //!
 //! JARs stored as `{hash_type}_{hash}.jar` — duplicate downloads are
 //! automatically deduplicated, and lookup is O(1).
+//!
+//! A `cache_manifest.json` file tracks last-access timestamps for LRU
+//! eviction, since filesystem atime is unreliable (noatime mounts, etc.).
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+
+const MANIFEST_FILE: &str = "cache_manifest.json";
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct CacheManifest {
+	entries: BTreeMap<String, u64>,
+}
+
+impl CacheManifest {
+	fn load(dir: &Path) -> Self {
+		let path = dir.join(MANIFEST_FILE);
+		if path.exists()
+			&& let Ok(data) = fs::read_to_string(&path)
+			&& let Ok(manifest) = serde_json::from_str(&data)
+		{
+			return manifest;
+		}
+		Self::default()
+	}
+
+	fn save(
+		&self,
+		dir: &Path,
+	) -> Result<()> {
+		let path = dir.join(MANIFEST_FILE);
+		let data = serde_json::to_string_pretty(self)
+			.context("Failed to serialize cache manifest")?;
+		fs::write(&path, data).context("Failed to write cache manifest")
+	}
+
+	fn touch(
+		&mut self,
+		key: &str,
+	) {
+		let now = epoch_secs();
+		self.entries.insert(key.to_string(), now);
+	}
+
+	fn remove(
+		&mut self,
+		key: &str,
+	) {
+		self.entries.remove(key);
+	}
+
+	fn prune_missing(
+		&mut self,
+		dir: &Path,
+	) {
+		self.entries.retain(|key, _| {
+			let path = dir.join(format!("{}.jar", key));
+			path.exists()
+		});
+	}
+}
+
+fn epoch_secs() -> u64 {
+	use std::time::{SystemTime, UNIX_EPOCH};
+	SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.unwrap_or_default()
+		.as_secs()
+}
 
 /// Content-addressed cache for mod JAR files.
 ///
 /// Path: `~/.cache/yammm/jars/sha512_abc123.jar`
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct JarCache {
 	cache_dir: PathBuf,
+	manifest: Arc<Mutex<CacheManifest>>,
+}
+
+impl Clone for JarCache {
+	fn clone(&self) -> Self {
+		Self {
+			cache_dir: self.cache_dir.clone(),
+			manifest: Arc::clone(&self.manifest),
+		}
+	}
 }
 
 impl JarCache {
 	pub fn new(cache_dir: PathBuf) -> Self {
-		Self { cache_dir }
+		let manifest = CacheManifest::load(&cache_dir);
+		Self {
+			cache_dir,
+			manifest: Arc::new(Mutex::new(manifest)),
+		}
 	}
 
 	pub fn with_default() -> Self {
@@ -41,7 +123,13 @@ impl JarCache {
 		&self.cache_dir
 	}
 
+	fn persist_manifest(&self) {
+		let manifest = self.manifest.lock().unwrap_or_else(|e| e.into_inner());
+		let _ = manifest.save(&self.cache_dir);
+	}
+
 	/// Look up a cached JAR by hash. Returns `Some(path)` if it exists.
+	/// Records access time in the manifest for LRU eviction.
 	pub fn get(
 		&self,
 		hash_type: crate::types::HashType,
@@ -49,6 +137,13 @@ impl JarCache {
 	) -> Option<PathBuf> {
 		let path = self.jar_path(hash_type, hash);
 		if path.exists() {
+			let key = format!("{}_{}", hash_type.as_str(), hash);
+			{
+				let mut manifest =
+					self.manifest.lock().unwrap_or_else(|e| e.into_inner());
+				manifest.touch(&key);
+			}
+			self.persist_manifest();
 			Some(path)
 		} else {
 			None
@@ -86,14 +181,23 @@ impl JarCache {
 			fs::rename(&tmp, &dest).or_else(|_| {
 				if dest.exists() {
 					let _ = fs::remove_file(&tmp);
-					Ok(())
+					Ok::<(), anyhow::Error>(())
 				} else {
-					Err(anyhow::anyhow!(
-						"Failed to rename temp file to cache destination"
-					))
+					Err(crate::errors::YammmError::general(
+						"Failed to rename temp file to cache destination",
+					)
+					.into())
 				}
 			})?;
 		}
+
+		let key = format!("{}_{}", hash_type.as_str(), hash);
+		{
+			let mut manifest =
+				self.manifest.lock().unwrap_or_else(|e| e.into_inner());
+			manifest.touch(&key);
+		}
+		self.persist_manifest();
 
 		Ok(hash)
 	}
@@ -109,6 +213,13 @@ impl JarCache {
 			fs::remove_file(&path)
 				.context(format!("Failed to remove cached JAR: {}", hash))?;
 		}
+		let key = format!("{}_{}", hash_type.as_str(), hash);
+		{
+			let mut manifest =
+				self.manifest.lock().unwrap_or_else(|e| e.into_inner());
+			manifest.remove(&key);
+		}
+		self.persist_manifest();
 		Ok(())
 	}
 
@@ -162,7 +273,8 @@ impl JarCache {
 		Ok(count)
 	}
 
-	/// Write raw bytes into the cache, returning the path and computed hash.
+	/// Write raw bytes into the cache using atomic writes (.tmp + rename).
+	/// Returns the path and computed hash.
 	pub fn write_bytes(
 		&self,
 		hash_type: crate::types::HashType,
@@ -173,8 +285,31 @@ impl JarCache {
 		fs::create_dir_all(&self.cache_dir)
 			.context("Failed to create cache directory")?;
 		let dest = self.jar_path(hash_type, computed_hash);
-		fs::write(&dest, bytes)
+		if dest.exists() {
+			return Ok((dest, computed_hash.to_string()));
+		}
+		let tmp = dest.with_extension("tmp");
+		fs::write(&tmp, bytes)
 			.with_context(|| format!("Failed to write cached JAR: {}", name))?;
+		fs::rename(&tmp, &dest).or_else(|_| {
+			if dest.exists() {
+				let _ = fs::remove_file(&tmp);
+				Ok::<(), anyhow::Error>(())
+			} else {
+				Err(crate::errors::YammmError::general(format!(
+					"Failed to commit cached JAR: {}",
+					name
+				))
+				.into())
+			}
+		})?;
+		let key = format!("{}_{}", hash_type.as_str(), computed_hash);
+		{
+			let mut manifest =
+				self.manifest.lock().unwrap_or_else(|e| e.into_inner());
+			manifest.touch(&key);
+		}
+		self.persist_manifest();
 		Ok((dest, computed_hash.to_string()))
 	}
 
@@ -187,10 +322,11 @@ impl JarCache {
 			{
 				let entry = entry.context("Failed to read cache entry")?;
 				let path = entry.path();
-				if path.is_file() && Self::is_jar_file(&path) {
-					if let Ok(metadata) = entry.metadata() {
-						total += metadata.len();
-					}
+				if path.is_file()
+					&& Self::is_jar_file(&path)
+					&& let Ok(metadata) = entry.metadata()
+				{
+					total += metadata.len();
 				}
 			}
 		}
@@ -207,7 +343,8 @@ impl JarCache {
 	}
 
 	/// Evict files until the cache is at or below `max_size_bytes`.
-	/// Uses atime-based LRU (oldest access time removed first).
+	/// Uses manifest-based LRU (oldest recorded access time removed first).
+	/// More reliable than atime, which is often disabled (noatime mounts).
 	pub fn cleanup(
 		&self,
 		max_size_bytes: u64,
@@ -221,7 +358,11 @@ impl JarCache {
 			return Ok(0);
 		}
 
-		let mut entries: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
+		let mut manifest =
+			self.manifest.lock().unwrap_or_else(|e| e.into_inner());
+		manifest.prune_missing(&self.cache_dir);
+
+		let mut entries: Vec<(String, u64, u64)> = Vec::new();
 
 		for entry in fs::read_dir(&self.cache_dir)
 			.context("Failed to read cache directory")?
@@ -229,30 +370,42 @@ impl JarCache {
 			let entry = entry.context("Failed to read cache entry")?;
 			let path = entry.path();
 
-			if path.is_file() && Self::is_jar_file(&path) {
-				if let Ok(metadata) = entry.metadata() {
-					let accessed = metadata.accessed().unwrap_or(UNIX_EPOCH);
-					entries.push((path, metadata.len(), accessed));
-				}
+			if path.is_file()
+				&& Self::is_jar_file(&path)
+				&& let Ok(metadata) = entry.metadata()
+			{
+				let file_size = metadata.len();
+				let filename =
+					path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+				let key = filename
+					.strip_suffix(".jar")
+					.unwrap_or(filename)
+					.to_string();
+				let last_access =
+					manifest.entries.get(&key).copied().unwrap_or(0);
+				entries.push((key, file_size, last_access));
 			}
 		}
 
 		entries.sort_by_key(|a| a.2);
 
-		// Remove least-recently-accessed files first
 		let mut removed = 0u64;
 		let mut remaining = current_size;
 
-		for (path, size, _) in entries {
+		for (key, size, _) in entries {
 			if remaining <= max_size_bytes {
 				break;
 			}
+			let path = self.cache_dir.join(format!("{}.jar", key));
 			if fs::remove_file(&path).is_ok() {
+				manifest.remove(&key);
 				removed += size;
 				remaining -= size;
 			}
 		}
 
+		drop(manifest);
+		self.persist_manifest();
 		Ok(removed)
 	}
 }

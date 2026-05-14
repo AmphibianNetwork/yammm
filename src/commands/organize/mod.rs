@@ -89,11 +89,11 @@ impl OrganizeCommand {
 
 		if !config_dir.exists() {
 			return Err(crate::errors::YammmError::invalid_args(format!(
-					"Source directory not found: {}\nLaunch {} first with `yammm launch {}`",
-					config_dir.display(),
-					side.as_str(),
-					side.as_str()
-				))
+				"Source directory not found: {}\nLaunch {} first with `yammm launch {}`",
+				config_dir.display(),
+				side.as_str(),
+				side.as_str()
+			))
 			.into());
 		}
 
@@ -299,10 +299,10 @@ pub fn assign_config(
 
 	let rel_path_to_side =
 		diff_paths(&config.path, &config_dir).ok_or_else(|| {
-			anyhow::anyhow!(
+			crate::errors::YammmError::config_error(format!(
 				"Config file outside of config dir: {}",
 				config.path.display()
-			)
+			))
 		})?;
 
 	let dest_dir = if dest_idx == 0 {
@@ -321,10 +321,10 @@ pub fn assign_config(
 	let dest_path = dest_dir.join(&rel_path_to_side);
 
 	std::fs::create_dir_all(dest_path.parent().ok_or_else(|| {
-		anyhow::anyhow!(
+		crate::errors::YammmError::config_error(format!(
 			"Config file has no parent directory: {}",
 			dest_path.display()
-		)
+		))
 	})?)?;
 	std::fs::copy(&config.path, &dest_path)?;
 	std::fs::remove_file(&config.path)?;

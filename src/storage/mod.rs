@@ -1,7 +1,7 @@
 //! Storage layer: all filesystem I/O for config and mod data.
 //!
 //! - `ManifestStore` — reads/writes `modpack.toml`
-//! - `EntryStore` — reads/writes per-mod `mod.ron` files under `<type_dir>/<slug>/`
+//! - `EntryStore` — reads/writes per-mod `entry.ron` files under `<type_dir>/<slug>/`
 //! - `JarCache` — content-addressed JAR file cache (hash-based filenames)
 //! - `CacheManager` — unified management across jars/minecraft/loaders subdirs
 //!

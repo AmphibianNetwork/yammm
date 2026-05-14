@@ -2,50 +2,75 @@
 
 ## Error Classification
 
-yammm uses a typed `ErrorKind` enum attached to `anyhow::Error` for exit code determination. All internal error paths use `with_kind()` or `bail_with_kind!()` to classify errors. A minimal legacy fallback handles third-party `reqwest::Error` types that aren't wrapped by our code.
+yammm uses a typed `YammmError` enum attached to `anyhow::Error` for exit code determination. All internal error paths use convenience constructors (e.g. `YammmError::mod_not_found()`) to classify errors. A minimal legacy fallback handles third-party `reqwest::Error` types that aren't wrapped by our code.
 
 ---
 
-## ErrorKind Enum
+## YammmError Enum
 
-| Code | Kind | Description |
-|------|------|-------------|
-| 1 | `General` | Catch-all for unexpected errors |
-| 2 | `InvalidArgs` | Invalid CLI arguments or config parse failure |
-| 3 | `ModNotFound` | Mod slug/ID not found on the source |
-| 4 | `DownloadFailed` | Download or hash verification failure |
-| 5 | `ConfigError` | Configuration file error |
-| 6 | `NetworkError` | Network timeout, DNS failure, or HTTP 5xx |
-| 7 | `StorageError` | I/O or storage failure |
-| 8 | `DependencyError` | Dependency resolution failure |
-| 9 | `VersionConflict` | No version satisfies constraints |
-| 10 | `CircularDependency` | Circular dependency detected |
+| Code | Variant | Description |
+|------|---------|-------------|
+| 1 | `General(String)` | Catch-all for unexpected errors |
+| 2 | `InvalidArgs(String)` | Invalid CLI arguments or config parse failure |
+| 3 | `ModNotFound(String)` | Mod slug/ID not found on the source |
+| 4 | `DownloadFailed(String)` | Download failure |
+| 4 | `HashMismatch { name, expected, actual }` | Hash verification failure |
+| 5 | `ConfigError(String)` | Configuration file error |
+| 6 | `NetworkError(String)` | Network timeout, DNS failure, or HTTP 5xx |
+| 6 | `NetworkRequest(reqwest::Error)` | Raw reqwest error (auto-converted via `#[from]`) |
+| 7 | `IoError(std::io::Error)` | I/O or storage failure (auto-converted via `#[from]`) |
+| 3–8 | `Api(ApiError)` | API-layer error (delegates to `ApiError::exit_code()`) |
+| 9 | `VersionConflict(String)` | No version satisfies constraints |
+| 10 | `CircularDependency { mod_id, chain }` | Circular dependency detected |
+
+The `Api` variant wraps `ApiError` from `api/error.rs`. Its exit code depends on the inner variant:
+
+| ApiError variant | Exit code |
+|-----------------|-----------|
+| `NotFound` / `Http { status: 404 }` | 3 |
+| `HashMismatch` | 4 |
+| `Network` / `Request` | 6 |
+| `Io` | 7 |
+| All others (`Http`, `Json`, `Url`, `Install`) | 8 |
 
 ---
 
-## Attaching ErrorKind
+## Attaching YammmError
 
-Errors are classified using `with_kind()` or the `bail_with_kind!` macro:
+Errors are classified using convenience constructors:
 
 ```rust
-use crate::errors::{ErrorKind, with_kind};
+use crate::errors::YammmError;
 
-return Err(with_kind(ErrorKind::ModNotFound, format!("Mod '{}' not found", id)));
+return Err(YammmError::mod_not_found(format!("Mod '{}' not found", id)).into());
 
-// Or using the macro:
-bail_with_kind!(ErrorKind::NetworkError, "Failed to fetch: HTTP {}", status);
+return Err(YammmError::network_error("Failed to fetch: HTTP 500").into());
+
+return Err(YammmError::hash_mismatch("mod.jar", "abc123", "def456").into());
 ```
+
+Available constructors: `invalid_args()`, `mod_not_found()`, `download_failed()`, `config_error()`, `network_error()`, `version_conflict()`, `circular_dep()`, `general()`, `hash_mismatch()`.
+
+---
+
+## Retryable Errors
+
+`YammmError::is_retryable()` returns `true` for:
+- `NetworkError` — always retryable
+- `HashMismatch` — re-downloading may fix the mismatch
+- `NetworkRequest` — only if `is_timeout()`, `is_connect()`, or `is_request()`
+- `Api(api_err)` — delegates to `ApiError::is_retryable()`, which returns `true` for HTTP 429/5xx, network errors, and hash mismatches
 
 ---
 
 ## Legacy Exit Code Fallback
 
-For errors without an attached `ErrorKind` (typically raw `reqwest::Error` from third-party code), the `legacy_exit_code()` function checks the error chain for:
+For errors without an attached `YammmError` (typically raw `reqwest::Error` from third-party code), the `exit_code()` function in `errors/mod.rs` checks the error chain for:
 
 1. `reqwest::Error` with `is_timeout()` or `is_connect()` → exit code 6 (network)
 2. Everything else → exit code 1 (general)
 
-The fragile string-matching heuristic has been removed. All yammm code paths use typed `ErrorKind`.
+All yammm code paths use typed `YammmError`.
 
 ---
 
@@ -93,7 +118,7 @@ Controlled by `RUST_LOG` environment variable or `--debug` flag.
 
 1. Verify hash after download
 2. If mismatch, retry up to 3 times with fresh download
-3. If persistent failure, remove partial file and return `DownloadFailed`
+3. If persistent failure, remove partial file and return `DownloadFailed` or `HashMismatch`
 
 ### API Rate Limiting
 

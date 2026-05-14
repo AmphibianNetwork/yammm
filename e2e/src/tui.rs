@@ -3,15 +3,15 @@ use std::io;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{
-	disable_raw_mode, enable_raw_mode, EnterAlternateScreen,
-	LeaveAlternateScreen,
+	EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+	enable_raw_mode,
 };
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use ratatui::Terminal;
 
 use crate::matrix::{LaunchSide, Loader, TestCase};
 

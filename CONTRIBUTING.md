@@ -39,5 +39,5 @@ See [docs/specs/architecture.md](docs/specs/architecture.md) for the system desi
 
 ## Reporting Issues
 
-- Use [GitHub Issues](https://github.com/Conquerix/yammm/issues)
+- Use [GitHub Issues](https://github.com/AmphibianNetwork/yammm/issues)
 - Include: yammm version, OS, steps to reproduce, expected vs actual behavior

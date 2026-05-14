@@ -4,15 +4,15 @@ package.version = "0.1.0"
 
 [package]
 authors = ["Conquerix <conquerix@shulker.link>"]
-edition = "2021"
+edition = "2024"
 build = "build/build.rs"
 # If you change the name here, you must also do it in flake.nix (and run `cargo generate-lockfile` afterwards)
 name = "yammm"
 description = "Yet Another Minecraft Modpack Maker"
 version.workspace = true
-rust-version = "1.80"
-repository = "https://github.com/Conquerix/yammm"
-homepage = "https://github.com/Conquerix/yammm"
+rust-version = "1.88"
+repository = "https://github.com/AmphibianNetwork/yammm"
+homepage = "https://github.com/AmphibianNetwork/yammm"
 keywords = ["minecraft", "modpack", "cli", "modrinth", "curseforge"]
 categories = ["command-line-utilities", "games"]
 license = "MIT"
@@ -25,15 +25,27 @@ eula = false
 
 [package.metadata.deb]
 maintainer = "Conquerix <conquerix@shulker.link>"
-copyright = "2026, Conquerix <conquerix@shulker.link>"
+copyright = "2026, Amphibian Network <contact@amphibian.network>"
 license-file = ["LICENSE", "4"]
 depends = "libx11-6, libwayland-client0, libxkbcommon0"
 section = "utils"
 priority = "optional"
 assets = [
-    ["target/dist/yammm", "usr/bin/", "755"],
-    ["LICENSE", "usr/share/doc/yammm/", "644"],
-    ["CHANGELOG.md", "usr/share/doc/yammm/", "644"],
+    [
+        "target/dist/yammm",
+        "usr/bin/",
+        "755",
+    ],
+    [
+        "LICENSE",
+        "usr/share/doc/yammm/",
+        "644",
+    ],
+    [
+        "CHANGELOG.md",
+        "usr/share/doc/yammm/",
+        "644",
+    ],
 ]
 
 [package.metadata.generate-rpm]
@@ -51,8 +63,9 @@ assets = [
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["syntax-highlight"]
+default = ["syntax-highlight", "tui"]
 syntax-highlight = ["syntect"]
+tui = ["ratatui", "crossterm", "tui-textarea", "nucleo-matcher", "arboard"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -63,7 +76,6 @@ dirs = "6"
 sha1 = "0.10"
 sha2 = "0.10"
 md-5 = "0.10"
-digest = "0.10"
 hex = "0.4"
 zip = "2"
 serde = { version = "1", features = ["derive"] }
@@ -80,18 +92,25 @@ pathdiff = "0.2"
 console = "0.15"
 indicatif = "0.17"
 comfy-table = "7"
-ratatui = "0.29"
-crossterm = "0.28"
-nucleo-matcher = "0.3"
-syntect = { version = "5", default-features = false, features = ["default-fancy"], optional = true }
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
+nucleo-matcher = { version = "0.3", optional = true }
+syntect = { version = "5", default-features = false, features = [
+    "default-fancy",
+], optional = true }
 path-clean = "1"
-base64 = "0.22"
-flate2 = "1.1.9"
-tar = "0.4.45"
+flate2 = "1.1"
+tar = "0.4"
 ctrlc = "3"
 time = { version = "0.3", features = ["local-offset"] }
-tui-textarea = "0.7"
-arboard = "3"
+tui-textarea = { version = "0.7", optional = true }
+arboard = { version = "3", optional = true }
+self_update = { version = "0.44", features = [
+    "archive-tar",
+    "archive-zip",
+    "compression-flate2",
+    "compression-zip-deflate",
+] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -107,3 +126,6 @@ tempfile = "3"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
