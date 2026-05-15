@@ -1,0 +1,29 @@
+name: Scheduled
+
+on:
+  schedule:
+    # 06:17 UTC daily — off the hour to avoid GitHub Actions runner contention spikes.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  network-tests:
+    name: Network-dependent tests (scheduled)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run ignored (network) tests
+        run: cargo test --test integration_tests -- --ignored --test-threads=1
+
+  security-audit:
+    name: cargo audit (scheduled)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
