@@ -111,10 +111,8 @@ fn handle_mouse(
 		MouseEventKind::ScrollUp => match app.mode {
 			Mode::DepTree => app.dep_tree_move_up(),
 			Mode::InstallDeps => app.dep_move_up(),
-			Mode::InstallProgress => {
-				if app.dep_output_scroll > 0 {
-					app.dep_output_scroll -= 1;
-				}
+			Mode::InstallProgress if app.dep_output_scroll > 0 => {
+				app.dep_output_scroll -= 1;
 			}
 			_ => {}
 		},

@@ -1,0 +1,13 @@
+# Configuration for `cargo audit` (kept in sync with the `ignore` input of
+# the rustsec/audit-check job in .github/workflows/ci.yml).
+
+[advisories]
+# quick-xml < 0.41 quadratic-runtime DoS advisories. The only remaining
+# consumer of quick-xml 0.38 is self_update 0.44 (it only parses release
+# metadata from the configured GitHub API endpoint, not attacker-chosen
+# XML). Upstream already bumped to quick-xml ^0.41 in the 1.0.0 release
+# candidates — drop these ignores when migrating to self_update 1.0.
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
