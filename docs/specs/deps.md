@@ -44,26 +44,40 @@ These sources return empty dependency lists since their APIs don't provide depen
 
 ## BFS Resolution Algorithm
 
-The `DependencyResolver` in `services/resolver.rs` works as follows:
+The `DependencyResolver` in `services/resolver.rs` uses **two queues** — `required` and `optional` — to keep priority O(1) per pop instead of an O(n) linear scan:
 
-1. **Initialize** a queue with the root mod's dependencies
-2. **Dequeue** the next dependency
-3. **Skip** if the mod is already installed in the profile
-4. **Skip** if the mod was already resolved in this session (avoid duplicates)
-5. **Fetch** mod metadata and versions from the source provider
-6. **Select** the latest compatible version (matching MC version + loader)
-7. **Enqueue** the new mod's dependencies (required first, then optional)
-8. **Repeat** until queue is empty
+1. **Initialize**: push the root mod into `required` with empty `ancestors`.
+2. **Pop**: from `required` first; only pop from `optional` when `required` is empty.
+3. **Skip** if the mod is already in the resolved set (deduplication, including raw project ID ↔ slug aliasing).
+4. **Cycle check**: if the mod key appears in the popped entry's `ancestors`, return `YammmError::CircularDependency`.
+5. **Fetch** mod metadata and the latest version matching the active MC version + loader filters.
+6. **Record** both `key` and `canonical_key` (slug-based) in the resolved set to avoid re-walking via aliases.
+7. **Skip recursion** if the entry's kind is `Embedded` — embedded deps ship inside the parent JAR.
+8. **Enqueue** each child dependency into `required` or `optional` (based on effective kind), carrying the ancestor set extended with the parent's key.
 
-### Priority Order
+### Priority order
 
-Required dependencies are enqueued before optional ones, ensuring that:
-- All required deps are resolved first
-- Optional deps that fail to resolve are non-fatal (logged and skipped)
+`required` drains fully before `optional` gets a turn. Consequence:
 
-### Cycle Handling
+- All required deps resolve first; a failure short-circuits the whole call.
+- Optional deps that fail are logged and dropped — the rest of the tree keeps going.
 
-If a mod appears in the resolution queue that was already visited, it is skipped. This naturally handles cycles since BFS visits each mod at most once.
+### Optional downgrade propagation
+
+When the parent's resolved kind is `Optional`, all children are forced to `Optional` regardless of what the source said. This prevents an optional branch from secretly pulling in mandatory installs.
+
+### Self-references and incompatibility
+
+- A dependency whose `mod_id` matches the parent's `mod_id` or `source_id` is skipped at enqueue time (some APIs occasionally return these).
+- `Incompatible` deps are skipped without warning — they're advisory metadata, not something we'd ever try to install.
+
+### Connector compatibility fallback
+
+When a Forge or NeoForge resolution fails and a Fabric–Forge connector mod is present in the modpack, the resolver retries the same mod under the Fabric loader. This is handled at the [`commands/import/resolve.rs`](../../src/commands/import/resolve.rs) and [`commands/add/mod.rs`](../../src/commands/add/mod.rs) layer, not inside the core resolver — see `should_try_connector`.
+
+### Test coverage
+
+`src/services/resolver.rs::tests` covers: linear chains, optional downgrade, mutual deps (direct + 3-cycle), diamond dependency, raw-project-id deduplication, required-fail propagation, optional-fail silent, embedded skip-without-recurse, incompatible skip, self-reference filter, and filter passthrough.
 
 ### Version Selection
 

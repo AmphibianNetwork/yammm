@@ -204,6 +204,32 @@ yammm launch client --offline --java /path/to/java
 yammm launch server --port 25565 --eula --jvm-args="-Xmx4G"
 ```
 
+Online-mode client launch requires a Microsoft account — see the `auth` section below.
+
+### 11a. Authenticate (online launch)
+
+```bash
+# Sign in with your Microsoft account (device code flow)
+yammm auth login
+
+# Check current authentication state
+yammm auth status
+
+# Sign out and remove stored credentials
+yammm auth logout
+```
+
+Tokens are stored at `~/.config/yammm/auth.json` with restricted permissions. The launch command automatically refreshes expired access tokens via the stored refresh token. See [microsoft-auth-setup.md](microsoft-auth-setup.md) if you're standing up a new Azure AD app.
+
+### 11b. Interactive modpack manager (TUI)
+
+```bash
+# Browse, add, remove, update mods interactively
+yammm manage
+```
+
+Only available when compiled with the `tui` feature (default). Backed by ratatui + crossterm.
+
 ### 12. Shell Completions
 
 ```bash
@@ -246,6 +272,41 @@ yammm config edit
 # Reset to defaults
 yammm config reset
 ```
+
+### 15. Self-update
+
+```bash
+# Check for a newer release (no install)
+yammm self-update --check
+
+# Update in place, with confirmation
+yammm self-update
+
+# Update without confirmation
+yammm self-update -y
+```
+
+Pulls the latest release archive from the GitHub Releases API and replaces
+the running binary. Self-update is automatically disabled when running from
+`/nix/store/` — update via `nix flake update` instead.
+
+#### Verifying the downloaded binary
+
+yammm's self-update path currently relies on HTTPS to GitHub for transport
+integrity but does **not** automatically verify a detached signature or
+SHA-256 checksum of the downloaded artifact. If you operate in a high-trust
+environment and want belt-and-braces verification, perform it manually:
+
+```bash
+# Pin a version, download the archive + checksums.txt from the release page,
+# then verify:
+sha256sum -c checksums.txt --ignore-missing
+```
+
+Checksums and (where present) GPG signatures are published alongside every
+GitHub release. Automatic verification is tracked as a follow-up — until
+then, treat `yammm self-update` as equivalent to `curl | tar`: only as
+trustworthy as your TLS chain to `github.com`.
 
 ---
 
@@ -361,8 +422,27 @@ yammm launch <SUBCOMMAND> [OPTIONS]
 
 Subcommands:
   client [--offline] [--jvm-args <ARGS>] [--java <PATH>]
-  server [--port <PORT>] [--eula] [--jvm-args <ARGS>]
+  server [--port <PORT>] [--eula] [--jvm-args <ARGS>] [--java <PATH>]
 ```
+
+Defaults to `client` when no subcommand is given.
+
+### `auth` - Microsoft / Mojang authentication
+```
+yammm auth <SUBCOMMAND>
+
+Subcommands:
+  login     Sign in via Microsoft device code flow
+  logout    Remove stored credentials
+  status    Show current auth state
+```
+
+### `manage` - Interactive TUI modpack manager
+```
+yammm manage
+```
+
+Requires the `tui` feature (default).
 
 ### `cache` - Manage the global cache
 ```
@@ -394,6 +474,15 @@ Shells:
   bash, zsh, fish, elvish
 ```
 
+### `self-update` - Update the yammm binary in place
+```
+yammm self-update [OPTIONS]
+
+Options:
+  -c, --check   Check for updates without installing
+  -y, --yes     Skip confirmation prompts
+```
+
 ---
 
 ## Project Structure
@@ -406,13 +495,13 @@ my-modpack/
 │   └── ignored_configs.ron  # Ignored config file paths
 ├── mods/                 # Mod metadata directories
 │   └── {mod-id}/
-│       └── mod.ron       # Per-mod metadata (source, version, hash, dependencies)
+│       └── entry.ron     # Per-mod metadata (source, version, hash, dependencies)
 ├── resourcepacks/       # Resource pack metadata directories
 │   └── {pack-id}/
-│       └── pack.ron
+│       └── entry.ron
 ├── shaderpacks/         # Shader pack metadata directories
 │   └── {pack-id}/
-│       └── pack.ron
+│       └── entry.ron
 ├── config/               # Fallback config files
 ├── resources/
 │   ├── client/           # Client-side resource overrides
@@ -421,7 +510,7 @@ my-modpack/
 └── README.md
 ```
 
-Mod metadata is stored as `.ron` files in per-mod subdirectories. The `modpack.toml` file only contains modpack-wide settings. Downloaded JARs are stored in the global cache, not in the modpack directory.
+Per-item metadata lives in `entry.ron` files inside per-id subdirectories. The `modpack.toml` file only contains modpack-wide settings. Downloaded JARs are stored in the global cache, not in the modpack directory.
 
 ## Configuration
 

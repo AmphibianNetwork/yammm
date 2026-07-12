@@ -51,7 +51,7 @@ Three reasons:
 
 1. **Capture machinery.** `output::*` checks a thread-local capture flag; when the TUI in `commands/manage/tui.rs` runs a download, it captures status lines instead of letting them scroll the terminal. Bypassing `output::*` breaks that.
 2. **Color control.** `output::set_colors_enabled(false)` (driven by `[output] color = false` in global config) only works for code that goes through `output::*`. Direct `println!` ignores it.
-3. **One channel = one place to add behavior.** Future concerns (`--quiet`, `--json`, structured stdout) land in `output.rs`, not scattered across every command.
+3. **One channel = one place to add behavior.** `--quiet` is wired through `output::set_quiet()` and silences every stdout helper (status, headings, bullets, progress bars) while leaving stderr error/warning lines visible. Future concerns (`--json`, structured stdout) land here too, not scattered across every command.
 
 ### Why not `tracing` for user output?
 

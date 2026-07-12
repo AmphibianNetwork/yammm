@@ -1,148 +1,185 @@
-# Architecture Specification
+# Architecture
 
-## Overview
+yammm is a Rust CLI for managing Minecraft modpacks. It's organized as a layered, acyclic architecture: high-level commands delegate to services, which call providers, which call API clients. Storage, config, and caching sit underneath as primitives.
 
-yammm is a Rust CLI for managing Minecraft modpacks. It uses a layered architecture where high-level commands delegate to focused modules that handle specific responsibilities.
-
----
-
-## Design Principles
-
-- **Separation of concerns**: Each module handles one domain (API clients, providers, storage, caching)
-- **Abstraction over sources**: `ModSourceProvider` trait unifies all 3 mod sources behind a common interface
-- **Cache transparency**: `JarCache` handles all JAR storage and deduplication; commands don't manage files directly
-- **Graceful failures**: No panics, proper error propagation with typed `YammmError` + exit codes
+For the conventions that hold this architecture together (output channel, `AppContext` accessors, pure-builder extractions), read [conventions.md](conventions.md) before contributing.
 
 ---
 
-## Layered Architecture
+## Design principles
+
+- **Separation of concerns.** Each layer owns one kind of concern: HTTP shape (api), domain translation (providers), business logic (services), orchestration (commands), persistence (storage), state (config), bytes-on-disk (cache).
+- **Closed-set providers.** `ModSourceProvider` is implemented by a fixed enum of 3 variants (Modrinth, CurseForge, URL), dispatched manually via a macro. Avoids async-trait boxing without sacrificing polymorphism.
+- **Typed errors with exit codes.** Library layers return `thiserror` enums; the CLI surface wraps them in `anyhow` for ergonomic `?` propagation. `errors::exit_code` walks the cause chain to recover the structured exit code. See [errors.md](errors.md).
+- **Cache transparency.** Mods, MC JARs, libraries, and loader installs all live in the global cache, deduplicated by content hash. Commands don't manage files directly.
+- **Bounded async.** Concurrent downloads use a semaphore. HTTP retry has jitter and respects `Retry-After`. No unbounded `join_all`.
+
+---
+
+## Layered architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      CLI Layer (clap)                       │
-│  cli.rs — parses arguments, dispatches to commands          │
-├─────────────────────────────────────────────────────────────┤
-│                 AppContext (global state)                    │
-│  GlobalConfig │ SourceRegistry │ App │ JarCache │ HTTP      │
-├─────────────────────────────────────────────────────────────┤
-│                    Command Layer                             │
-│  16 commands: init, add, remove, search, info, update,      │
-│  export, import, launch, auth, cache, config, self-update,  │
-│  completions, organize, manage                               │
-├─────────────────────────────────────────────────────────────┤
-│                   Provider Layer                             │
-│  Provider enum (manual dispatch) + ModSourceProvider trait  │
-│  + 3 implementations: ModrinthSource, CurseForgeSource,     │
-│  UrlSource                                                   │
-├─────────────────────────────────────────────────────────────┤
-│                     API Layer                                │
-│  Raw HTTP clients: ModrinthClient, CurseForgeClient,        │
-│  MinecraftClient, FabricClient, QuiltClient,                │
-│  ForgeClient, NeoForgeClient                                │
-├─────────────────────────────────────────────────────────────┤
-│          Domain / Storage / Cache / Config                   │
-│  Types (ModSource, TrackedMod, Version, HashType, ...)      │
-│  EntryStore (RON) │ ManifestStore (TOML) │ JarCache         │
-│  GlobalConfig (TOML) │ Storage (facade)                     │
-└─────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                       CLI Layer (clap)                        │
+│  cli.rs — argument parsing, dispatch                          │
+├───────────────────────────────────────────────────────────────┤
+│                  AppContext (shared state)                    │
+│  global / modpack / registry / http_client / jar_cache /      │
+│  cache_dir — all behind accessor methods (see conventions.md) │
+├───────────────────────────────────────────────────────────────┤
+│                       Command Layer                           │
+│  16 commands: init, add, remove, search, info, update,        │
+│  export, import, launch (largest — own subsystem), organize,  │
+│  manage, cache, config, auth, self-update, completions        │
+├───────────────────────────────────────────────────────────────┤
+│                      Service Layer                            │
+│  resolver (BFS dep resolver) │ download (semaphore-bounded)   │
+│  mod_install / deps_install / connector / dep_graph           │
+├───────────────────────────────────────────────────────────────┤
+│                      Provider Layer                           │
+│  Provider enum + ModSourceProvider trait                      │
+│  ModrinthSource │ CurseForgeSource │ UrlSource                │
+├───────────────────────────────────────────────────────────────┤
+│                        API Layer                              │
+│  ModrinthClient │ CurseForgeClient │ MinecraftClient │        │
+│  FabricClient │ QuiltClient │ ForgeClient │ NeoForgeClient │  │
+│  GitHubClient │ AdoptiumClient │ streaming │ retry            │
+├───────────────────────────────────────────────────────────────┤
+│             Domain / Storage / Cache / Config                 │
+│  types │ EntryStore (RON) │ ManifestStore (TOML) │ JarCache   │
+│  CacheManager │ GlobalConfig │ Storage facade                 │
+└───────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## Module Map
-
-| Module       | Responsibility                                                                 |
-| ------------ | ------------------------------------------------------------------------------ |
-| `cli.rs`     | Argument parsing (clap), command dispatch                                      |
-| `app.rs`     | `App` (loaded modpack), `AppContext` (global CLI state)                        |
-| `commands/`  | 16 command implementations (2 behind `tui` feature gate)                      |
-| `providers/` | `ModSourceProvider` trait + 3 source implementations + `Provider` enum + registry |
-| `api/`       | Raw HTTP clients for external services                                         |
-| `services/`  | Business logic: dependency resolver, download manager                          |
-| `storage/`   | Persistence: `EntryStore` (RON), `JarCache`, `ManifestStore`, `Storage` facade |
-| `config/`    | Global and modpack configuration (TOML-based)                                  |
-| `types/`     | Domain types: `ModSource`, `TrackedMod`, `Version`, `VersionReq`, `HashType`, etc. |
-| `errors/`    | Typed error classification (`YammmError`) with exit-code mapping                |
-| `output.rs`  | Terminal output formatting (colors, progress bars, tables)                     |
-| `utils/`     | Helpers: `slugify`, `format_size`, `print_error`, etc.                         |
+Dependencies flow strictly downward. No layer imports from a layer above it; the test suite would not compile if that rule were broken.
 
 ---
 
-## AppContext and App
+## Module map
 
-### AppContext
+| Module             | Responsibility                                                                                                                                                       |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cli.rs`           | Top-level clap parsing, dispatch, `init_logging`                                                                                                                     |
+| `app.rs`           | `App` (loaded modpack) and `AppContext` (shared CLI state) — see [conventions.md §2](conventions.md#2-appcontext-access) for the accessor contract                   |
+| `commands/`        | 16 command implementations. `manage` and parts of `organize` are gated behind the `tui` feature; `organize`'s syntax highlighting is gated behind `syntax-highlight` |
+| `commands/launch/` | The launch subsystem (client + server), large enough to warrant its own doc — see [launch.md](launch.md)                                                             |
+| `providers/`       | `ModSourceProvider` trait, `Provider` enum, three source implementations, `SourceRegistry`, `MockSource` for tests                                                   |
+| `api/`             | Raw HTTP clients (no domain types), shared retry/streaming infrastructure, Forge-style installer helpers                                                             |
+| `services/`        | Business logic: dependency resolution, download orchestration, mod install / dep install pipelines                                                                   |
+| `storage/`         | `EntryStore` (RON), `ManifestStore` (TOML), `JarCache` + `CacheManager`, `Storage` facade                                                                            |
+| `config/`          | `GlobalConfig` (`~/.config/yammm/config.toml`), `ModpackManifest` (`modpack.toml`)                                                                                   |
+| `types/`           | Domain types: `ModSource`, `TrackedMod`, `Version`, `VersionReq`, `HashType`, `LoaderType`, `ModInfo`, etc.                                                          |
+| `errors/`          | `YammmError` enum with exit-code mapping; `exit_code()` chain walker                                                                                                 |
+| `output.rs`        | The single user-output channel — styled helpers, capture machinery, progress bars. See [conventions.md §1](conventions.md#1-user-output-channel)                     |
+| `utils/`           | Helpers: `slugify`, `format_size`, `print_error`, `current_os_name`, maven coord parsing, etc.                                                                       |
+| `auth/`            | Microsoft OAuth2 device-code flow for online-mode launch                                                                                                             |
 
-Global state shared across all commands, created once at startup:
+---
 
-- `global: GlobalConfig` — user preferences from `~/.config/yammm/config.toml`
-- `modpack: Option<App>` — current modpack (None if not in a modpack directory)
-- `cwd: PathBuf` — current working directory
-- `registry: Arc<SourceRegistry>` — provider registry (maps source keys to providers)
-- `http_client: reqwest::Client` — shared HTTP client
-- `insecure: bool` — SSL verification disabled flag
-- `cache_dir: PathBuf` — resolved cache directory
-- `jar_cache: JarCache` — global JAR cache
+## `AppContext`
 
-Initialization flow:
-1. Load global config from disk (or use defaults)
-2. Build HTTP client (with optional insecure mode)
-3. Resolve cache directory (env var → config → platform default)
-4. Initialize `JarCache`
-5. Find and load modpack if `modpack.toml` exists in CWD or `--config` path
-6. Build `SourceRegistry` from config (CurseForge provider requires API key)
+Built once at startup; carried through every command. Fields are private — access via methods. See [conventions.md §2](conventions.md#2-appcontext-access).
 
-### App
+| Accessor            | Returns                | Notes                                                  |
+| ------------------- | ---------------------- | ------------------------------------------------------ |
+| `global()`          | `&GlobalConfig`        | Read access                                            |
+| `global_mut()`      | `&mut GlobalConfig`    | Only the `config` command should reach for this        |
+| `modpack()`         | `Option<&App>`         | None when invoked outside a pack                       |
+| `require_modpack()` | `Result<&App>`         | Errors with `InvalidArgs` (exit 2) when not in a pack  |
+| `in_modpack()`      | `bool`                 | Convenience for branchy commands                       |
+| `registry()`        | `&Arc<SourceRegistry>` | Shared, cloneable for handing into tasks               |
+| `http_client()`     | `&reqwest::Client`     | Shared connection pool — clone instead of constructing |
+| `jar_cache()`       | `&JarCache`            | Global hash-addressed JAR store                        |
+| `cache_dir()`       | `&Path`                | Resolved cache root                                    |
+
+### Build flow
+
+1. Load `GlobalConfig` from disk (or defaults).
+2. Resolve `cwd` and build the shared `reqwest::Client` (with optional `--insecure`).
+3. Resolve cache directory: `--cache-dir` arg → `YAMMM_CACHE_DIR` env → `cache_dir` config → platform default.
+4. Initialize `JarCache`.
+5. Walk upward from `cwd` looking for `modpack.toml` (like `git` finds `.git`); load `App` if found.
+6. Build `SourceRegistry` from config (CurseForge provider activates only if an API key is present).
+
+---
+
+## `App`
 
 Represents a loaded modpack:
 
-- `root_dir: PathBuf` — modpack root directory
-- `config: ModpackManifest` — parsed `modpack.toml`
-- `storage: Storage` — unified storage facade
-- `cache: JarCache` — global JAR cache
+| Field      | Type              | Source                                  |
+| ---------- | ----------------- | --------------------------------------- |
+| `root_dir` | `PathBuf`         | The directory containing `modpack.toml` |
+| `config`   | `ModpackManifest` | Parsed `modpack.toml`                   |
+| `storage`  | `Storage`         | Unified persistence facade              |
+| `cache`    | `JarCache`        | Reference to the global cache           |
 
 Three construction paths:
-- `App::from_parts()` — explicit config
-- `App::load()` — from existing `modpack.toml`
-- `App::create()` — default/empty config (for `init`)
+
+- `App::load(root_dir, cache)` — parse existing `modpack.toml`.
+- `App::create(root_dir, cache)` — default empty config, for `init`.
+- `App::from_parts(root_dir, config, cache)` — explicit, used by import.
 
 ---
 
-## Provider vs API Layer
+## Provider vs. API layer
 
-The key architectural split is between **API clients** (`api/`) and **providers** (`providers/`):
+The cleanest seam in the codebase, and the one to study first.
 
-- **API clients** are thin HTTP wrappers that handle request/response serialization for specific services. They know about HTTP headers, endpoints, and response formats but nothing about yammm's domain.
+**API clients** in `src/api/` are thin HTTP wrappers. They know URLs, headers, and JSON shapes; they don't know what a "mod" is. `ModrinthClient` deserializes a `ModrinthProject`, period.
 
-- **Providers** implement the `ModSourceProvider` trait and translate API client responses into yammm's domain types (`ModInfo`, `ModVersion`, `SourceDependency`). They also add business logic like version filtering, loader matching, and hash type mapping.
+**Providers** in `src/providers/` implement `ModSourceProvider`. They call API clients, translate the responses into yammm's domain types (`ModInfo`, `ModVersion`, `SourceDependency`), and add business rules — version filtering by MC version + loader, hash-type mapping, environment classification, etc.
 
-Dispatch is via the `Provider` enum with a `dispatch!` macro instead of `dyn ModSourceProvider`, avoiding boxing of async futures.
+Dispatch is via the `Provider` enum with a manual macro instead of `Box<dyn ModSourceProvider>`:
 
-This separation means adding a new mod source requires:
-1. An API client in `api/` (HTTP concerns)
-2. A provider in `providers/` (domain translation)
-3. Registration in `SourceRegistry`
+```rust
+pub enum Provider {
+    Modrinth(ModrinthSource),
+    CurseForge(CurseForgeSource),
+    Url(UrlSource),
+}
+```
 
----
-
-## Command Flow
-
-1. **Parse CLI** via clap in `cli.rs`
-2. **Build AppContext**: load config, init cache, find/load modpack, build registry
-3. **Execute command**: each command accesses `AppContext` for state
-4. **Delegate to providers/services**: commands call `Provider` methods or `DependencyResolver` / download manager
-5. **Persist changes**: `EntryStore` saves `entry.ron` files, `ManifestStore` saves `modpack.toml`
-6. **Return exit code** via `errors::exit_code()` — typed `YammmError` with legacy fallback
+This avoids `Pin<Box<dyn Future>>` allocations on every call without giving up the trait abstraction inside the implementations. Adding a new source requires editing the enum (closed-set, on purpose — see [services.md](services.md) for the full walkthrough).
 
 ---
 
-## Spec Files
+## Command flow
 
-| File                       | Description                           |
-| -------------------------- | ------------------------------------- |
-| [cli.md](cli.md)           | CLI commands and options              |
-| [config.md](config.md)     | Configuration (global + modpack)      |
-| [storage.md](storage.md)   | Local file structure and RON format   |
-| [services.md](services.md) | Provider trait, API clients, registry |
-| [deps.md](deps.md)         | Dependency resolution algorithm       |
-| [caching.md](caching.md)   | JAR file caching                      |
-| [errors.md](errors.md)     | Error types and exit codes            |
+1. **Parse** CLI args via clap in `cli.rs`.
+2. **Build `AppContext`**: load config, init cache, find/load modpack, build registry.
+3. **Dispatch** to the matching command's `run(args, ctx)`.
+4. The command **reads through accessors** (`ctx.registry()`, `ctx.require_modpack()?`, etc.), calls **services** (`DependencyResolver`, `download_missing_mods`, ...), which call **providers**, which call **API clients**.
+5. **Persist** via `EntryStore` (`entry.ron` files) and `ManifestStore` (`modpack.toml`).
+6. **Emit output** through `output::*` ([conventions.md §1](conventions.md#1-user-output-channel)).
+7. **Return** an `anyhow::Result<()>` from `run`; the bin in `src/bin/yammm.rs` calls `errors::exit_code(&err)` to map to a process exit code.
+
+---
+
+## Library surface
+
+`src/lib.rs` is deliberately narrow. Only three symbols are public:
+
+```rust
+pub use cli::Cli;
+pub use errors::exit_code;
+pub use utils::print_error;
+```
+
+Everything else is `pub(crate)`. The binary at `src/bin/yammm.rs` is the only legitimate consumer of the library; tests live inside `src/` so they don't need the surface widened. New `pub` items shouldn't appear without a reason that survives a code review.
+
+---
+
+## Spec files
+
+| File                             | Description                                                         |
+| -------------------------------- | ------------------------------------------------------------------- |
+| [cli.md](cli.md)                 | CLI commands, flags, and exit codes                                 |
+| [conventions.md](conventions.md) | Code conventions (output channel, AppContext access, pure builders) |
+| [config.md](config.md)           | Global and modpack configuration schemas                            |
+| [storage.md](storage.md)         | On-disk layout, RON format, config file ownership                   |
+| [caching.md](caching.md)         | Global cache layout and eviction                                    |
+| [services.md](services.md)       | Provider trait, API clients, registry                               |
+| [deps.md](deps.md)               | Dependency resolution algorithm                                     |
+| [launch.md](launch.md)           | The launch subsystem (client + server)                              |
+| [errors.md](errors.md)           | Error types and exit codes                                          |

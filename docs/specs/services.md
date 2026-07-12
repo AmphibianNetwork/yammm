@@ -13,7 +13,7 @@ Commands interact with the `Provider` enum, never with API clients directly.
 
 ## ModSourceProvider Trait
 
-The core abstraction that unifies all 3 mod sources. Uses native async fn in trait (Rust 1.75+), not `async_trait`:
+The core abstraction that unifies all 3 mod sources. Uses native `async fn` in trait (stable since Rust 1.75; this crate's MSRV is 1.88), not the `async_trait` crate:
 
 ```rust
 #[allow(async_fn_in_trait)]
@@ -121,8 +121,12 @@ Finds the primary JAR asset from release assets (filters by `.jar` extension, pr
 
 ### Shared Infrastructure
 
-- **`api/retry.rs`**: Exponential backoff with `Retry-After` header support. Separate configs for general API calls (`API_RETRY_CONFIG`, max 3 retries) and auth flow calls (`AUTH_RETRY_CONFIG`, max 3 retries). `send_retried_request()` for API calls, separate auth retry via `send_retried_request` with auth config.
-- **`api/installer/`**: Directory with 5 files: `mod.rs`, `libraries.rs`, `processors.rs`, `profile.rs`, `templates.rs`. Shared Forge/NeoForge installer logic.
+- **`api/retry.rs`**: Exponential backoff with ±25% jitter and `Retry-After` header support. Two presets:
+  - `API_RETRY_CONFIG`: 3 retries, 500ms initial — general API calls.
+  - `AUTH_RETRY_CONFIG`: 2 retries, 1s initial — Microsoft OAuth steps.
+  Retryable on 429 / 5xx / network errors; fast-fail on 4xx.
+- **`api/streaming.rs`**: Chunked HTTP download into a temp file with hash verification; CPU-bound hashing runs inside `tokio::spawn_blocking`.
+- **`api/installer/`**: Shared Forge/NeoForge installer pipeline (`mod.rs`, `libraries.rs`, `processors.rs`, `profile.rs`, `templates.rs`).
 
 ---
 
@@ -130,11 +134,11 @@ Finds the primary JAR asset from release assets (filters by `.jar` extension, pr
 
 ### Dependency Resolver (`services/resolver.rs`)
 
-BFS-based resolver that traverses the dependency graph starting from a root mod. See [deps.md](deps.md) for details.
+BFS-based resolver that traverses the dependency graph starting from a root mod. Required deps are dequeued before optional ones (fail fast); optional deps that fail to resolve are logged and skipped. Cycles are detected via ancestor tracking; raw-project-ID vs slug references are deduplicated by canonical key. See [deps.md](deps.md) for details.
 
 ### Download Manager (`services/download.rs`)
 
-Finds mods without cached JARs and downloads them concurrently using a tokio semaphore (default 8 concurrent tasks, configurable via `max_concurrent_downloads`). Includes hash verification and retry logic. Returns a `DownloadSummary` with success/failure counts.
+Finds mods without cached JARs and downloads them concurrently using a tokio semaphore (default 8 concurrent tasks, configurable via `max_concurrent_downloads`). Streams to a temp file, hashes from disk, atomically renames into the cache only on hash match. Returns a `DownloadSummary` whose `.into_result()` aggregates failures while preserving the first error's variant for [exit code](errors.md) recovery.
 
 ---
 

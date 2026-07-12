@@ -1,126 +1,65 @@
 # yammm Documentation
 
-Welcome to the yammm (Yet Another Minecraft Modpack Maker) documentation. This guide covers everything you need to know about the CLI tool for managing Minecraft modpacks.
-
-## Quick Start
-
-```bash
-# Initialize a new modpack
-yammm init --name "My Pack" --minecraft-version 1.20.4 --loader fabric
-
-# Search and add a mod
-yammm search jei
-yammm add jei
-
-# Launch Minecraft (downloads missing mods automatically)
-yammm launch client
-
-# Export as MRPACK
-yammm export -f mrpack
-```
+This directory holds yammm's user guide and developer specs. The repo-root [README.md](../README.md) is the marketing surface; this is where the depth lives.
 
 ---
 
-## User Guide
-
-See [USAGE.md](USAGE.md) for a step-by-step walkthrough of every command.
-
-### CLI Reference
-
-| Command | Description |
-|---------|-------------|
-| `yammm init` | Initialize a new modpack |
-| `yammm search <query>` | Search for mods |
-| `yammm add <query>` | Add mods to profile |
-| `yammm remove <mod>` | Remove mods from profile |
-| `yammm info` | Show modpack/mod information |
-| `yammm update` | Check for mod updates |
-| `yammm launch <client\|server>` | Launch Minecraft |
-| `yammm export` | Export modpack |
-| `yammm import <file>` | Import a modpack |
-| `yammm organize <client\|server>` | Sort orphan configs |
-| `yammm cache <subcmd>` | Manage global cache |
-| `yammm config <subcmd>` | Manage global config |
-| `yammm completions <shell>` | Generate shell completions |
-
-For detailed command options and examples, see [USAGE.md](USAGE.md) and the [CLI Specification](specs/cli.md).
-
----
-
-## Architecture Documentation
-
-For developers contributing to yammm.
-
-### Core Architecture
+## For users
 
 | Document | Description |
-|----------|-------------|
-| [architecture.md](specs/architecture.md) | System overview, module structure, data flow |
-| [services.md](specs/services.md) | Provider trait, API clients, source registry |
-| [config.md](specs/config.md) | Global and modpack configuration |
-| [storage.md](specs/storage.md) | Mod file storage and metadata |
-| [caching.md](specs/caching.md) | JAR file caching and deduplication |
-| [deps.md](specs/deps.md) | Dependency resolution algorithm |
-| [errors.md](specs/errors.md) | Error types and exit codes |
-
-### Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      CLI Layer (clap)                       │
-├─────────────────────────────────────────────────────────────┤
-│                 AppContext (global state)                    │
-│           GlobalConfig │ SourceRegistry │ App               │
-├─────────────────────────────────────────────────────────────┤
-│                    Command Layer                             │
-│  init │ add │ remove │ search │ info │ update │ ...         │
-├─────────────────────────────────────────────────────────────┤
-│                   Provider Layer                             │
-│  ModrinthSource │ CurseForgeSource │ UrlSource               │
-├─────────────────────────────────────────────────────────────┤
-│                     API Layer                                │
-│  ModrinthClient │ CurseForgeClient │ ...                     │
-├─────────────────────────────────────────────────────────────┤
-│              Domain / Storage / Cache                        │
-│  Types │ ModStore (RON) │ ModpackConfig (TOML) │ JarCache  │
-└─────────────────────────────────────────────────────────────┘
-```
+|---|---|
+| [USAGE.md](USAGE.md) | Step-by-step walkthrough of every command, with examples |
+| [specs/cli.md](specs/cli.md) | Reference for every command flag, exit code, and environment variable |
+| [microsoft-auth-setup.md](microsoft-auth-setup.md) | Setting up a custom Azure AD app for Microsoft authentication (only needed if you're forking) |
 
 ---
 
-## Development
+## For contributors
 
-```bash
-# Build the project
-cargo build
+Read in this order:
 
-# Run tests
-cargo test
+1. [../CONTRIBUTING.md](../CONTRIBUTING.md) — setup, day-to-day commands, navigation
+2. [specs/architecture.md](specs/architecture.md) — layered architecture, module map, `AppContext`
+3. [specs/conventions.md](specs/conventions.md) — output channel, `AppContext` access, pure-builder pattern
 
-# Run with debug output
-cargo run -- --debug search jei
-```
+Then dig into whichever subsystem you're touching:
 
-### Documentation Structure
+| Subsystem | Spec |
+|---|---|
+| Provider trait + API clients | [specs/services.md](specs/services.md) |
+| Dependency resolution (BFS) | [specs/deps.md](specs/deps.md) |
+| The launcher (client + server) | [specs/launch.md](specs/launch.md) |
+| On-disk layout and RON files | [specs/storage.md](specs/storage.md) |
+| Global cache and eviction | [specs/caching.md](specs/caching.md) |
+| Configuration schemas | [specs/config.md](specs/config.md) |
+| Error model and exit codes | [specs/errors.md](specs/errors.md) |
+| JSON output schemas for every `--json` command | [specs/json-output.md](specs/json-output.md) |
+
+---
+
+## Doc tree
 
 ```
 docs/
-├── README.md                       # This file — main documentation index
-├── USAGE.md                        # Step-by-step usage guide
-├── microsoft-auth-setup.md         # Azure AD app setup for auth
-└── specs/                          # Detailed specifications
-    ├── architecture.md             # System architecture overview
-    ├── caching.md                  # JAR file caching
-    ├── cli.md                      # Full CLI specification
-    ├── config.md                   # Configuration schema
-    ├── deps.md                     # Dependency resolution
-    ├── errors.md                   # Error types and exit codes
-    ├── services.md                 # API integrations and provider trait
-    └── storage.md                  # Storage and metadata formats
+├── README.md                       # this file
+├── USAGE.md                        # user walkthrough
+├── microsoft-auth-setup.md         # Azure AD setup for forks
+└── specs/
+    ├── architecture.md             # system architecture
+    ├── caching.md                  # JAR + MC + loader caching
+    ├── cli.md                      # CLI reference
+    ├── config.md                   # config schemas
+    ├── conventions.md              # code conventions
+    ├── deps.md                     # dependency resolver
+    ├── errors.md                   # error types and exit codes
+    ├── json-output.md              # JSON payload schemas per command
+    ├── launch.md                   # launch subsystem
+    ├── services.md                 # providers and API clients
+    └── storage.md                  # on-disk layout
 ```
 
 ---
 
 ## License
 
-yammm is released under the MIT License. See [LICENSE](../LICENSE) for details.
+yammm is released under the MIT License. See [LICENSE](../LICENSE).

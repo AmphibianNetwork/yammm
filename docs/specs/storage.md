@@ -140,6 +140,32 @@ All `Storage` methods require a `ProjectType` parameter for dispatch:
 
 ---
 
+## Concurrency Model
+
+yammm assumes **a single writer per modpack at a time**. The CLI is short-lived
+and operates from one process, so this is the realistic case. The pieces line
+up with that assumption:
+
+- **`EntryStore`** writes `entry.ron` files atomically via `.tmp` + `rename`,
+  but does *not* hold an OS-level lock. Concurrent `yammm add` processes
+  against the same modpack are undefined behavior — last writer wins on each
+  individual `entry.ron`, and the manifest tail can interleave.
+- **`ManifestStore`** writes `modpack.toml` the same way: atomic file
+  replacement, no lock. A second concurrent writer can clobber the first.
+- **`JarCache`** is the exception — its in-memory LRU manifest sits behind
+  an `Arc<Mutex<>>` and handles poisoning. It's the only storage component
+  designed for shared, multi-threaded access (the launcher and downloader
+  read it from the same async runtime). The on-disk manifest still uses
+  atomic write, so a second yammm process can't corrupt it, but the two
+  processes will overwrite each other's LRU bookkeeping.
+
+If you ever need true multi-process safety (e.g., a long-running daemon),
+add a `flock`-style lock file at the modpack root and acquire it in
+`App::load` / `App::create`. Until then: don't run two `yammm` writes
+against the same modpack at once.
+
+---
+
 ## Config Storage
 
 Config files are stored in multiple locations based on scope and ownership:

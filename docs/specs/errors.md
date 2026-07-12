@@ -51,6 +51,8 @@ return Err(YammmError::hash_mismatch("mod.jar", "abc123", "def456").into());
 
 Available constructors: `invalid_args()`, `mod_not_found()`, `download_failed()`, `config_error()`, `network_error()`, `version_conflict()`, `circular_dep()`, `general()`, `hash_mismatch()`.
 
+> The `HashMismatch` variant is most often constructed indirectly via `From<ApiError>` (the download pipeline lifts an `ApiError::HashMismatch` into a `YammmError`). The `YammmError::hash_mismatch(...)` factory is reserved for direct callers and tests.
+
 ---
 
 ## Retryable Errors
@@ -76,7 +78,7 @@ All yammm code paths use typed `YammmError`.
 
 ## User-Facing Error Display
 
-Errors are displayed with chained context using `utils::print_error()`:
+Errors are displayed with chained context using `utils::print_error()` (re-exported at the crate root as `yammm::print_error`):
 
 ```
 Error: Mod 'create' not found on Modrinth

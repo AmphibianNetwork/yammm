@@ -8,7 +8,7 @@ yammm uses the Microsoft OAuth2 device code flow to authenticate Minecraft playe
 
 1. Go to [Microsoft Entra admin center](https://entra.microsoft.com) → **App registrations** → **New registration**
 2. **Name**: `yammm`
-3. **Supported account types**: "Accounts in any organizational directory and personal Microsoft accounts"
+3. **Supported account types**: "Personal Microsoft accounts"
 4. **Redirect URI**: Select **Mobile and desktop applications** → set to `https://login.microsoftonline.com/common/oauth2/nativeclient`
 5. Click **Register**
 6. Note the **Application (client) ID** — this becomes `MS_CLIENT_ID` in the code
