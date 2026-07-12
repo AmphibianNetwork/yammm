@@ -39,8 +39,8 @@ jobs:
       - name: Run unit tests
         shell: bash
         run: |
-          cargo test --lib 2>&1 | tee test-out.txt
-          status=${PIPESTATUS[0]}
+          status=0
+          cargo test --lib 2>&1 | tee test-out.txt || status=$?
           if [ "$status" != "0" ]; then
             grep -E "FAILED|panicked at|^error" test-out.txt | head -40 | while IFS= read -r line; do echo "::error::${line}"; done
           fi
@@ -49,8 +49,8 @@ jobs:
       - name: Run integration tests
         shell: bash
         run: |
-          cargo test --test integration_tests --test command_flows -- --test-threads=1 2>&1 | tee test-out.txt
-          status=${PIPESTATUS[0]}
+          status=0
+          cargo test --test integration_tests --test command_flows -- --test-threads=1 2>&1 | tee test-out.txt || status=$?
           if [ "$status" != "0" ]; then
             grep -E "FAILED|panicked at|^error" test-out.txt | head -40 | while IFS= read -r line; do echo "::error::${line}"; done
           fi
