@@ -46,9 +46,12 @@ pub(crate) fn init_logging(debug: bool) {
 	let filter = EnvFilter::try_from_default_env()
 		.unwrap_or_else(|_| EnvFilter::new(default_level));
 
+	// Diagnostics belong on stderr (see docs/specs/json-output.md): stdout
+	// must stay clean so `--json` emits exactly one parseable document.
 	tracing_subscriber::fmt()
 		.with_env_filter(filter)
 		.with_target(false)
 		.without_time()
+		.with_writer(std::io::stderr)
 		.init();
 }
