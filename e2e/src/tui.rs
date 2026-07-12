@@ -67,18 +67,18 @@ impl App {
 	}
 
 	fn move_up(&mut self) {
-		if let Some(i) = self.state.selected() {
-			if i > 0 {
-				self.state.select(Some(i - 1));
-			}
+		if let Some(i) = self.state.selected()
+			&& i > 0
+		{
+			self.state.select(Some(i - 1));
 		}
 	}
 
 	fn move_down(&mut self) {
-		if let Some(i) = self.state.selected() {
-			if i < self.tests.len() - 1 {
-				self.state.select(Some(i + 1));
-			}
+		if let Some(i) = self.state.selected()
+			&& i < self.tests.len() - 1
+		{
+			self.state.select(Some(i + 1));
 		}
 	}
 
@@ -248,44 +248,44 @@ fn run_app(
 			f.render_widget(help, chunks[2]);
 		})?;
 
-		if event::poll(std::time::Duration::from_millis(100))? {
-			if let Event::Key(key) = event::read()? {
-				if key.kind != KeyEventKind::Press {
-					continue;
+		if event::poll(std::time::Duration::from_millis(100))?
+			&& let Event::Key(key) = event::read()?
+		{
+			if key.kind != KeyEventKind::Press {
+				continue;
+			}
+			match key.code {
+				KeyCode::Up => app.move_up(),
+				KeyCode::Down => app.move_down(),
+				KeyCode::Char(' ') => app.toggle(),
+				KeyCode::Char('a') => app.select_all(),
+				KeyCode::Char('n') => app.deselect_all(),
+				KeyCode::Char('1') => {
+					app.set_filter(Some(Loader::Fabric));
+					app.select_all();
 				}
-				match key.code {
-					KeyCode::Up => app.move_up(),
-					KeyCode::Down => app.move_down(),
-					KeyCode::Char(' ') => app.toggle(),
-					KeyCode::Char('a') => app.select_all(),
-					KeyCode::Char('n') => app.deselect_all(),
-					KeyCode::Char('1') => {
-						app.set_filter(Some(Loader::Fabric));
-						app.select_all();
-					}
-					KeyCode::Char('2') => {
-						app.set_filter(Some(Loader::Forge));
-						app.select_all();
-					}
-					KeyCode::Char('3') => {
-						app.set_filter(Some(Loader::NeoForge));
-						app.select_all();
-					}
-					KeyCode::Char('4') => {
-						app.set_filter(Some(Loader::Quilt));
-						app.select_all();
-					}
-					KeyCode::Char('0') => {
-						app.set_filter(None);
-					}
-					KeyCode::Enter => {
-						return Ok(app.selected_tests());
-					}
-					KeyCode::Char('q') | KeyCode::Esc => {
-						return Ok(Vec::new());
-					}
-					_ => {}
+				KeyCode::Char('2') => {
+					app.set_filter(Some(Loader::Forge));
+					app.select_all();
 				}
+				KeyCode::Char('3') => {
+					app.set_filter(Some(Loader::NeoForge));
+					app.select_all();
+				}
+				KeyCode::Char('4') => {
+					app.set_filter(Some(Loader::Quilt));
+					app.select_all();
+				}
+				KeyCode::Char('0') => {
+					app.set_filter(None);
+				}
+				KeyCode::Enter => {
+					return Ok(app.selected_tests());
+				}
+				KeyCode::Char('q') | KeyCode::Esc => {
+					return Ok(Vec::new());
+				}
+				_ => {}
 			}
 		}
 	}

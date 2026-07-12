@@ -801,17 +801,17 @@ impl Runner {
 		log_path: &Path,
 		timed_out: bool,
 	) -> bool {
-		if let Ok(contents) = fs::read_to_string(log_path) {
-			if contents.contains("Done (") {
-				return true;
-			}
+		if let Ok(contents) = fs::read_to_string(log_path)
+			&& contents.contains("Done (")
+		{
+			return true;
 		}
 
 		let mc_log = test_dir.join("server/logs/latest.log");
-		if let Ok(contents) = fs::read_to_string(mc_log) {
-			if contents.contains("Done (") {
-				return true;
-			}
+		if let Ok(contents) = fs::read_to_string(mc_log)
+			&& contents.contains("Done (")
+		{
+			return true;
 		}
 
 		timed_out
@@ -822,21 +822,20 @@ impl Runner {
 		test_dir: &Path,
 		log_path: &Path,
 	) -> bool {
-		if let Ok(contents) = fs::read_to_string(log_path) {
-			if contents.contains("Setting user:")
+		if let Ok(contents) = fs::read_to_string(log_path)
+			&& (contents.contains("Setting user:")
 				|| contents.contains("LWJGL")
-				|| contents.contains("OpenAL initialized")
-			{
-				return true;
-			}
+				|| contents.contains("OpenAL initialized"))
+		{
+			return true;
 		}
 
 		let client_log = test_dir.join("client/logs/latest.log");
-		if let Ok(contents) = fs::read_to_string(client_log) {
-			if contents.contains("Setting user:") || contents.contains("LWJGL")
-			{
-				return true;
-			}
+		if let Ok(contents) = fs::read_to_string(client_log)
+			&& (contents.contains("Setting user:")
+				|| contents.contains("LWJGL"))
+		{
+			return true;
 		}
 
 		false
@@ -919,11 +918,11 @@ fn tee_lines<R: Read>(
 		let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
 		println!("    {trimmed}");
 
-		if let Ok(mut guard) = log_writer.lock() {
-			if let Some(ref mut f) = *guard {
-				let _ = f.write_all(line.as_bytes());
-				let _ = f.flush();
-			}
+		if let Ok(mut guard) = log_writer.lock()
+			&& let Some(ref mut f) = *guard
+		{
+			let _ = f.write_all(line.as_bytes());
+			let _ = f.flush();
 		}
 
 		if line.contains(marker) {

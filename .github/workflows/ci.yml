@@ -24,18 +24,37 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
 
+      # --workspace matters: the root manifest is both a package and the
+      # workspace root, so without it cargo silently skips the e2e member.
       - name: Run clippy
         if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Run cargo check
-        run: cargo check
+        run: cargo check --workspace
 
+      # Test failures are echoed as ::error:: annotations because job logs
+      # need authentication to read, while check-run annotations are public —
+      # this makes cross-platform failures diagnosable without a token.
       - name: Run unit tests
-        run: cargo test --lib
+        shell: bash
+        run: |
+          cargo test --lib 2>&1 | tee test-out.txt
+          status=${PIPESTATUS[0]}
+          if [ "$status" != "0" ]; then
+            grep -E "FAILED|panicked at" test-out.txt | head -40 | while IFS= read -r line; do echo "::error::${line}"; done
+          fi
+          exit "$status"
 
       - name: Run integration tests
-        run: cargo test --test integration_tests -- --test-threads=1
+        shell: bash
+        run: |
+          cargo test --test integration_tests --test command_flows -- --test-threads=1 2>&1 | tee test-out.txt
+          status=${PIPESTATUS[0]}
+          if [ "$status" != "0" ]; then
+            grep -E "FAILED|panicked at" test-out.txt | head -40 | while IFS= read -r line; do echo "::error::${line}"; done
+          fi
+          exit "$status"
 
       - name: Run doc tests
         run: cargo test --doc
@@ -56,6 +75,12 @@ jobs:
   security-audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    # audit-check reports its results by creating a check run, which the
+    # default read-only GITHUB_TOKEN can't do ("Resource not accessible
+    # by integration").
+    permissions:
+      checks: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2.0.0
