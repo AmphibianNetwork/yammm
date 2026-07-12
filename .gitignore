@@ -11,6 +11,7 @@ result-lib/
 # Editor / IDE
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~
