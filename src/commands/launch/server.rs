@@ -427,7 +427,11 @@ fn parse_shim_jar_filenames(contents: &str) -> Vec<String> {
 				continue;
 			}
 			let jar_path = PathBuf::from(arg);
-			if jar_path.is_absolute() {
+			// unix_args.txt uses Unix path conventions regardless of host
+			// OS, so a leading '/' is absolute even where Path::is_absolute
+			// (Windows) disagrees; keep the native check as well in case a
+			// Windows-style absolute path ever shows up.
+			if jar_path.is_absolute() || arg.starts_with('/') {
 				continue;
 			}
 			if let Some(file_name) = jar_path.file_name()
