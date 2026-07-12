@@ -6,12 +6,7 @@ pub mod processors;
 pub mod profile;
 pub mod templates;
 
-pub use libraries::{
-	InstallerArtifact, InstallerLibrary, InstallerLibraryDownloads,
-};
-pub use processors::Processor;
-pub use profile::InstallProfile;
-pub use templates::{DataEntry, TemplateContext, maven_coords_to_path};
+pub use templates::TemplateContext;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -24,6 +19,8 @@ pub struct LoaderInstallResult {
 	pub jvm_args: Vec<String>,
 	pub game_args: Vec<String>,
 	pub lib_dir: PathBuf,
+	#[allow(dead_code)]
+	// set during install for future relative-path resolution
 	pub root_dir: PathBuf,
 }
 
@@ -224,17 +221,21 @@ pub async fn download_and_run_installer(
 
 	if !installer_jar.exists() {
 		output::info(format!("Downloading {} installer...", loader_name));
-		let response = http_client.get(installer_url).send().await?;
-		if !response.status().is_success() {
-			return Err(crate::errors::YammmError::download_failed(format!(
-				"Failed to download {} installer: HTTP {}",
-				loader_name,
-				response.status()
-			))
-			.into());
-		}
-		let bytes = response.bytes().await?;
-		std::fs::write(&installer_jar, &bytes)?;
+		// Forge/NeoForge installer URLs come from the loader's own metadata
+		// API, which doesn't surface a checksum — we can't integrity-check
+		// today. Streaming still keeps memory bounded for the multi-MB
+		// installer jar and the atomic rename avoids leaving a partial
+		// installer that subsequent runs would try to extract.
+		crate::api::streaming::download_to_file(
+			http_client,
+			installer_url,
+			&installer_jar,
+			crate::api::streaming::HashPolicy::AcceptedUnhashed {
+				reason: "Forge/NeoForge installer metadata does not expose a checksum",
+			},
+			&format!("{} installer", loader_name),
+		)
+		.await?;
 	}
 
 	output::info(format!("Extracting {} install profile...", loader_name));

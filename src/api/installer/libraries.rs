@@ -44,104 +44,51 @@ pub async fn download_profile_libraries(
 	pb.set_message("Downloading installer libraries");
 
 	for lib in &profile.libraries {
-		if let Some(ref artifact) = lib.downloads.artifact {
+		let outcome = if let Some(ref artifact) = lib.downloads.artifact {
 			let dest = lib_dir.join(&artifact.path);
-			if dest.exists() {
-				paths.push(dest);
-				pb.inc(1);
-				continue;
-			}
-
-			if let Some(parent) = dest.parent() {
-				std::fs::create_dir_all(parent)?;
-			}
-
-			let response = crate::api::retry::send_retried(
+			let policy = crate::api::streaming::HashPolicy::from_optional(
+				artifact.sha1.as_deref().map(|sha1| {
+					crate::api::streaming::ExpectedHash {
+						hash_type: crate::types::HashType::Sha1,
+						hex: sha1,
+					}
+				}),
+				"installer profile artifact has no sha1 in manifest",
+			);
+			download_one(
 				http_client,
 				&artifact.url,
-				Vec::new(),
+				&dest,
+				policy,
+				&artifact.path,
 			)
-			.await;
-			match response {
-				Ok(resp) if resp.status().is_success() => {
-					if let Ok(bytes) = resp.bytes().await {
-						if let Some(ref sha1) = artifact.sha1 {
-							let computed = crate::types::HashType::Sha1
-								.compute_for_bytes(&bytes);
-							if computed != *sha1 {
-								return Err(
-									crate::errors::YammmError::hash_mismatch(
-										&artifact.path,
-										sha1,
-										&computed,
-									)
-									.into(),
-								);
-							}
-						}
-						std::fs::write(&dest, &bytes)?;
-						paths.push(dest);
-					} else {
-						tracing::warn!(
-							"Failed to read response body for {}",
-							artifact.path
-						);
-					}
-				}
-				Ok(resp) => {
-					failures.push(format!(
-						"{}: HTTP {}",
-						artifact.path,
-						resp.status()
-					));
-				}
-				Err(e) => {
-					failures.push(format!("{}: {}", artifact.path, e));
-				}
-			}
+			.await
 		} else if let Some(ref maven_base) = lib.url {
 			let relative = crate::utils::maven::coords_to_path(&lib.name);
 			let dest = lib_dir.join(&relative);
-			if dest.exists() {
-				paths.push(dest);
-				pb.inc(1);
-				continue;
-			}
-
-			if let Some(parent) = dest.parent() {
-				std::fs::create_dir_all(parent)?;
-			}
-
 			let download_url =
 				format!("{}/{}", maven_base.trim_end_matches('/'), relative);
-			let response = crate::api::retry::send_retried(
+			// Forge/NeoForge maven entries rarely include a hash; we still
+			// stream + atomically rename, but we can't integrity-check.
+			download_one(
 				http_client,
 				&download_url,
-				Vec::new(),
+				&dest,
+				crate::api::streaming::HashPolicy::AcceptedUnhashed {
+					reason: "Forge/NeoForge maven library, no hash in manifest",
+				},
+				&lib.name,
 			)
-			.await;
-			match response {
-				Ok(resp) if resp.status().is_success() => {
-					if let Ok(bytes) = resp.bytes().await {
-						std::fs::write(&dest, &bytes)?;
-						paths.push(dest);
-					} else {
-						tracing::warn!(
-							"Failed to read response body for maven lib {}",
-							relative
-						);
-					}
-				}
-				Ok(resp) => {
-					failures.push(format!(
-						"{}: HTTP {}",
-						lib.name,
-						resp.status()
-					));
-				}
-				Err(e) => {
-					failures.push(format!("{}: {}", lib.name, e));
-				}
+			.await
+		} else {
+			Ok(None)
+		};
+
+		match outcome {
+			Ok(Some(path)) => paths.push(path),
+			Ok(None) => {}
+			Err((label, err)) => {
+				failures.push(format!("{}: {}", label, err));
 			}
 		}
 		pb.inc(1);
@@ -158,6 +105,30 @@ pub async fn download_profile_libraries(
 			failures.join(", ")
 		))
 		.into())
+	}
+}
+
+/// Download one library to `dest`. Returns `Ok(Some(path))` on success
+/// (including cache hits), `Err((label, msg))` on failure so the outer
+/// loop can aggregate.
+async fn download_one(
+	http_client: &reqwest::Client,
+	url: &str,
+	dest: &Path,
+	policy: crate::api::streaming::HashPolicy<'_>,
+	label: &str,
+) -> std::result::Result<Option<PathBuf>, (String, anyhow::Error)> {
+	match crate::api::streaming::download_to_file(
+		http_client,
+		url,
+		dest,
+		policy,
+		label,
+	)
+	.await
+	{
+		Ok(_) => Ok(Some(dest.to_path_buf())),
+		Err(e) => Err((label.to_string(), e)),
 	}
 }
 
@@ -181,36 +152,27 @@ pub(crate) async fn collect_version_libs(
 						artifact.get("url").and_then(|u| u.as_str())
 					&& !url.is_empty()
 				{
-					if let Some(parent) = lib_path.parent() {
-						std::fs::create_dir_all(parent)?;
-					}
-					match crate::api::retry::send_retried(
+					let sha1 = artifact.get("sha1").and_then(|s| s.as_str());
+					let policy =
+						crate::api::streaming::HashPolicy::from_optional(
+							sha1.map(|hex| {
+								crate::api::streaming::ExpectedHash {
+									hash_type: crate::types::HashType::Sha1,
+									hex,
+								}
+							}),
+							"version manifest library artifact has no sha1",
+						);
+					if let Err(e) = crate::api::streaming::download_to_file(
 						http_client,
 						url,
-						Vec::new(),
+						&lib_path,
+						policy,
+						path_str,
 					)
 					.await
 					{
-						Ok(resp) if resp.status().is_success() => {
-							if let Ok(bytes) = resp.bytes().await {
-								std::fs::write(&lib_path, &bytes)?;
-							} else {
-								tracing::warn!(
-									"Failed to read response body for {}",
-									path_str
-								);
-							}
-						}
-						Ok(resp) => {
-							failures.push(format!(
-								"{}: HTTP {}",
-								path_str,
-								resp.status()
-							));
-						}
-						Err(e) => {
-							failures.push(format!("{}: {}", path_str, e));
-						}
+						failures.push(format!("{}: {}", path_str, e));
 					}
 				}
 				if lib_path.exists() {
@@ -223,38 +185,20 @@ pub(crate) async fn collect_version_libs(
 			let relative = crate::utils::maven::coords_to_path(lib_name);
 			let lib_path = lib_dir.join(&relative);
 			if !lib_path.exists() {
-				if let Some(parent) = lib_path.parent() {
-					std::fs::create_dir_all(parent)?;
-				}
 				let download_url =
 					format!("{}/{}", maven_url.trim_end_matches('/'), relative);
-				match crate::api::retry::send_retried(
+				if let Err(e) = crate::api::streaming::download_to_file(
 					http_client,
 					&download_url,
-					Vec::new(),
+					&lib_path,
+					crate::api::streaming::HashPolicy::AcceptedUnhashed {
+						reason: "version manifest maven library, no hash exposed",
+					},
+					lib_name,
 				)
 				.await
 				{
-					Ok(resp) if resp.status().is_success() => {
-						if let Ok(bytes) = resp.bytes().await {
-							std::fs::write(&lib_path, &bytes)?;
-						} else {
-							tracing::warn!(
-								"Failed to read response body for {}",
-								lib_name
-							);
-						}
-					}
-					Ok(resp) => {
-						failures.push(format!(
-							"{}: HTTP {}",
-							lib_name,
-							resp.status()
-						));
-					}
-					Err(e) => {
-						failures.push(format!("{}: {}", lib_name, e));
-					}
+					failures.push(format!("{}: {}", lib_name, e));
 				}
 			}
 			if lib_path.exists() {

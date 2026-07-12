@@ -154,7 +154,7 @@ impl<'a> AddContext<'a> {
 			Err(e) => {
 				spin.finish_and_clear();
 				if !provider.supports_search() {
-					return Err(e);
+					return Err(e.into());
 				}
 				output::info(format!(
 					"Exact match not found, searching for '{}'...",
@@ -308,31 +308,33 @@ impl<'a> AddContext<'a> {
 	) -> anyhow::Result<ResolvedVersion> {
 		let filters = self.version_filters();
 
-		let result = if let Some(req) = &self.version_req {
-			let versions = provider.get_versions(mod_id, &filters).await?;
-			versions
-				.into_iter()
-				.find(|v| req.matches(&v.version))
-				.map(|v| ResolvedVersion {
-					version_data: v,
-					connector_compat: false,
-				})
-				.ok_or_else(|| {
-					crate::errors::YammmError::version_conflict(format!(
-						"Version matching {} not found",
-						req
-					))
-					.into()
-				})
-		} else {
-			provider
-				.get_latest_version(mod_id, &filters)
-				.await
-				.map(|v| ResolvedVersion {
-					version_data: v,
-					connector_compat: false,
-				})
-		};
+		let result: anyhow::Result<ResolvedVersion> =
+			if let Some(req) = &self.version_req {
+				let versions = provider.get_versions(mod_id, &filters).await?;
+				versions
+					.into_iter()
+					.find(|v| req.matches(&v.version))
+					.map(|v| ResolvedVersion {
+						version_data: v,
+						connector_compat: false,
+					})
+					.ok_or_else(|| {
+						crate::errors::YammmError::version_conflict(format!(
+							"Version matching {} not found",
+							req
+						))
+						.into()
+					})
+			} else {
+				provider
+					.get_latest_version(mod_id, &filters)
+					.await
+					.map(|v| ResolvedVersion {
+						version_data: v,
+						connector_compat: false,
+					})
+					.map_err(Into::into)
+			};
 
 		if result.is_ok() || !self.is_connector_eligible() {
 			return result;

@@ -126,11 +126,11 @@ where
 					let delay =
 						retry_delay(&e, attempt, config.initial_delay_ms);
 					tracing::warn!(
-						"Retry {}/{} in {}ms: {}",
-						attempt + 1,
-						config.max_retries,
-						delay.as_millis(),
-						e
+						attempt = attempt + 1,
+						max_retries = config.max_retries,
+						delay_ms = delay.as_millis() as u64,
+						error = %e,
+						"retrying request after failure"
 					);
 					tokio::time::sleep(delay).await;
 				}
@@ -186,34 +186,44 @@ fn retry_delay(
 }
 
 /// Returns a value in [-1.0, 1.0) for jitter calculation.
-/// Uses a simple xorshift PRNG seeded from the current time and thread id
-/// to avoid adding `rand` as a dependency.
+/// Uses a per-thread xorshift PRNG seeded from a global counter mixed with the
+/// thread's clock sample, so concurrent callers never share a state cell and
+/// can't lose seed-init increments to a TOCTOU race.
 fn rand_jitter_factor() -> f64 {
+	use std::cell::Cell;
 	use std::sync::atomic::{AtomicU64, Ordering};
-	static SEED: AtomicU64 = AtomicU64::new(0);
+
 	static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-	let mut seed = SEED.load(Ordering::Relaxed);
-	if seed == 0 {
-		seed = (std::time::SystemTime::now()
-			.duration_since(std::time::UNIX_EPOCH)
-			.unwrap_or_default()
-			.as_nanos() as u64)
-			.wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed));
+	thread_local! {
+		static SEED: Cell<u64> = const { Cell::new(0) };
 	}
-	seed ^= seed << 13;
-	seed ^= seed >> 7;
-	seed ^= seed << 17;
-	SEED.store(seed, Ordering::Relaxed);
 
-	(seed & 0xFFFF) as f64 / 0xFFFF as f64 * 2.0 - 1.0
+	SEED.with(|cell| {
+		let mut seed = cell.get();
+		if seed == 0 {
+			let ns = std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.unwrap_or_default()
+				.as_nanos() as u64;
+			seed = ns
+				.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+				.wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed))
+				| 1;
+		}
+		seed ^= seed << 13;
+		seed ^= seed >> 7;
+		seed ^= seed << 17;
+		cell.set(seed);
+
+		(seed & 0xFFFF) as f64 / 0xFFFF as f64 * 2.0 - 1.0
+	})
 }
 
 /// Send a GET request with retry, mapping error via closure.
 pub async fn send_retried_mapped<E>(
 	client: &reqwest::Client,
 	url: &str,
-	headers: Vec<(String, String)>,
+	headers: Vec<(&'static str, String)>,
 	map_err: impl Fn(RetryError) -> E,
 ) -> Result<reqwest::Response, E> {
 	match send_retried(client, url, headers).await {
@@ -226,21 +236,16 @@ pub async fn send_retried_mapped<E>(
 pub async fn send_retried(
 	client: &reqwest::Client,
 	url: &str,
-	headers: Vec<(String, String)>,
+	headers: Vec<(&'static str, String)>,
 ) -> Result<reqwest::Response, RetryError> {
 	let config = RetryConfig::default();
-	let client = client.clone();
-	let url = url.to_string();
 
 	let result = retry_request(&config, || {
-		let client = client.clone();
-		let url = url.clone();
-		let headers = headers.clone();
+		let mut req = client.get(url);
+		for (key, value) in &headers {
+			req = req.header(*key, value.as_str());
+		}
 		async move {
-			let mut req = client.get(&url);
-			for (key, value) in &headers {
-				req = req.header(key.as_str(), value.as_str());
-			}
 			let resp = req.send().await.map_err(|e| {
 				crate::errors::YammmError::network_error(format!("{}", e))
 			})?;
@@ -305,11 +310,12 @@ where
 							exponential_delay(attempt, config.initial_delay_ms)
 						};
 						tracing::warn!(
-							"Retry {}/{} in {}ms: {}",
-							attempt + 1,
-							config.max_retries,
-							delay.as_millis(),
-							err
+							attempt = attempt + 1,
+							max_retries = config.max_retries,
+							delay_ms = delay.as_millis() as u64,
+							status,
+							error = %err,
+							"retrying request after retryable HTTP status"
 						);
 						tokio::time::sleep(delay).await;
 					}
@@ -330,11 +336,11 @@ where
 					let delay =
 						exponential_delay(attempt, config.initial_delay_ms);
 					tracing::warn!(
-						"Retry {}/{} in {}ms: {}",
-						attempt + 1,
-						config.max_retries,
-						delay.as_millis(),
-						e
+						attempt = attempt + 1,
+						max_retries = config.max_retries,
+						delay_ms = delay.as_millis() as u64,
+						error = %e,
+						"retrying request after transport error"
 					);
 					tokio::time::sleep(delay).await;
 				}

@@ -145,7 +145,10 @@ async fn resolve_version(
 				.into()
 			})
 	} else {
-		provider.get_latest_version(mod_id, filters).await
+		provider
+			.get_latest_version(mod_id, filters)
+			.await
+			.map_err(Into::into)
 	}
 }
 

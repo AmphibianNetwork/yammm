@@ -14,6 +14,11 @@ const TOKEN_URL: &str =
 	"https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const SCOPE: &str = "XboxLive.SignIn XboxLive.offline_access";
 
+/// Fallback lifetime used when Microsoft's token response omits `expires_in`.
+/// Microsoft's documented default is 24 hours; refresh happens via the
+/// refresh-token path before this matters in practice.
+const DEFAULT_TOKEN_LIFETIME_SECS: u64 = 86400;
+
 #[derive(Debug, Deserialize)]
 struct DeviceCodeResponse {
 	device_code: String,
@@ -85,22 +90,34 @@ pub async fn device_code_flow(
 	let message = resp.message.clone().unwrap_or_else(|| {
 		format!("To sign in, visit: {}", resp.verification_uri)
 	});
-	crate::output::heading("Microsoft Authentication");
-	crate::output::blank_line();
-	crate::output::bullet(&message);
-	crate::output::bullet(format!("Enter code: {}", resp.user_code));
-	crate::output::blank_line();
-	crate::output::info("Waiting for authorization...");
+	if crate::output::is_json_mode() {
+		// The device-code prompt is critical: without it the user
+		// can't authorize the session. Stdout in JSON mode is reserved
+		// for the result document, so we surface the prompt on stderr
+		// where scripts already route human-facing text.
+		eprintln!("Microsoft Authentication");
+		eprintln!("{message}");
+		eprintln!("Enter code: {}", resp.user_code);
+		eprintln!("Waiting for authorization...");
+	} else {
+		crate::output::heading("Microsoft Authentication");
+		crate::output::blank_line();
+		crate::output::bullet(&message);
+		crate::output::bullet(format!("Enter code: {}", resp.user_code));
+		crate::output::blank_line();
+		crate::output::info("Waiting for authorization...");
+	}
 
-	let poll_interval =
+	let mut poll_interval =
 		std::time::Duration::from_secs(resp.interval.unwrap_or(5));
 	let deadline = std::time::Instant::now()
 		+ std::time::Duration::from_secs(resp.expires_in);
 
 	// Poll the token endpoint: wait for the user to complete login in the browser,
-	// then keep requesting a token. Handle three error states:
+	// then keep requesting a token. Handle three error states per RFC 8628 §3.5:
 	//   - authorization_pending: user hasn't approved yet, keep polling
-	//   - slow_down: back off an extra 5 seconds before retrying
+	//   - slow_down: the interval MUST be increased by 5 seconds for this and
+	//     all subsequent requests (not just sleep extra once)
 	//   - expired_token: the device code has timed out, abort
 	loop {
 		tokio::time::sleep(poll_interval).await;
@@ -131,7 +148,11 @@ pub async fn device_code_flow(
 					continue;
 				}
 				if err.error == "slow_down" {
-					tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+					// RFC 8628 §3.5: bump the persistent polling interval, not
+					// just a one-shot sleep. The previous implementation slept
+					// an extra 5s once and immediately went back to the old
+					// (too-aggressive) interval, which earns another slow_down.
+					poll_interval = bump_poll_interval(poll_interval);
 					continue;
 				}
 				if err.error == "expired_token" {
@@ -152,12 +173,25 @@ pub async fn device_code_flow(
 						"No refresh token received from Microsoft",
 					)
 				})?;
-				let expires_in = token_resp.expires_in.unwrap_or(86400);
+				let expires_in = token_resp
+					.expires_in
+					.unwrap_or(DEFAULT_TOKEN_LIFETIME_SECS);
 
 				return Ok((token_resp.access_token, refresh, expires_in));
 			}
 		}
 	}
+}
+
+/// Apply the RFC 8628 §3.5 rule: on `slow_down`, the polling interval MUST be
+/// increased by 5 seconds. We also cap at 60s so a misbehaving server can't
+/// stall auth forever.
+fn bump_poll_interval(current: std::time::Duration) -> std::time::Duration {
+	const SLOW_DOWN_INCREMENT: std::time::Duration =
+		std::time::Duration::from_secs(5);
+	const MAX_INTERVAL: std::time::Duration =
+		std::time::Duration::from_secs(60);
+	std::cmp::min(current + SLOW_DOWN_INCREMENT, MAX_INTERVAL)
 }
 
 /// Refreshes an expired access token using a stored refresh token.
@@ -208,7 +242,8 @@ pub async fn refresh_access_token(
 			let new_refresh = resp
 				.refresh_token
 				.unwrap_or_else(|| refresh_token.to_string());
-			let expires_in = resp.expires_in.unwrap_or(86400);
+			let expires_in =
+				resp.expires_in.unwrap_or(DEFAULT_TOKEN_LIFETIME_SECS);
 			Ok((resp.access_token, new_refresh, expires_in))
 		}
 	}
@@ -262,6 +297,24 @@ mod tests {
 			}
 			TokenOrError::Error(_) => panic!("Expected Token"),
 		}
+	}
+
+	#[test]
+	fn test_bump_poll_interval_adds_five_seconds() {
+		let bumped = bump_poll_interval(std::time::Duration::from_secs(5));
+		assert_eq!(bumped, std::time::Duration::from_secs(10));
+		let bumped_again = bump_poll_interval(bumped);
+		assert_eq!(bumped_again, std::time::Duration::from_secs(15));
+	}
+
+	#[test]
+	fn test_bump_poll_interval_caps_at_60s() {
+		let bumped = bump_poll_interval(std::time::Duration::from_secs(58));
+		assert_eq!(bumped, std::time::Duration::from_secs(60));
+		// Already at the cap — stays at the cap.
+		let still_capped =
+			bump_poll_interval(std::time::Duration::from_secs(60));
+		assert_eq!(still_capped, std::time::Duration::from_secs(60));
 	}
 
 	#[test]

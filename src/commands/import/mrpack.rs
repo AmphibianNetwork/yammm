@@ -1,5 +1,8 @@
 use super::ImportCommand;
-use super::helpers::{extract_slug_from_path, extract_version_from_path};
+use super::helpers::{
+	ExtractDecision, classify_archive_entry, extract_slug_from_path,
+	extract_version_from_path,
+};
 use crate::api::ModrinthClient;
 use crate::app::AppContext;
 use crate::commands::export::mrpack::{MrpackIndex, mrpack_env_to_mod_env};
@@ -10,7 +13,6 @@ use crate::types::{
 };
 use crate::utils::slugify;
 use anyhow::{Context, Result};
-use path_clean::PathClean;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -21,7 +23,7 @@ impl ImportCommand {
 	) -> Result<()> {
 		let output_dir = if let Some(ref dir) = self.output {
 			dir.clone()
-		} else if let Some(ref app) = ctx.modpack {
+		} else if let Some(app) = ctx.modpack() {
 			app.root_dir.clone()
 		} else {
 			let name =
@@ -32,7 +34,8 @@ impl ImportCommand {
 		output::info(format!("Importing: {}", self.file.display()));
 		output::bullet("Format: MRPACK (creates or updates modpack)");
 
-		if output_dir.exists() && !self.yes {
+		// JSON mode is non-interactive — treat as if --yes were passed.
+		if output_dir.exists() && !self.yes && !output::is_json_mode() {
 			let proceed = dialoguer::Confirm::new()
 				.with_prompt(
 					"Destination directory already exists. Import anyway?",
@@ -83,7 +86,7 @@ impl ImportCommand {
 
 		let storage = &app.storage;
 		let modrinth_client =
-			ModrinthClient::new().with_client(ctx.http_client.clone());
+			ModrinthClient::new().with_client(ctx.http_client().clone());
 
 		let mut added = 0usize;
 		let mut skipped = 0usize;
@@ -230,6 +233,18 @@ impl ImportCommand {
 				"{} mod(s) could not be resolved and were marked as unresolved. Use 'yammm update' or edit them manually.",
 				unresolved_count
 			));
+		}
+
+		if output::is_json_mode() {
+			output::emit_json(&serde_json::json!({
+				"command": "import",
+				"format": "mrpack",
+				"output_dir": output_dir.display().to_string(),
+				"added": added,
+				"skipped": skipped,
+				"unresolved": unresolved_count,
+			}))?;
+			return Ok(());
 		}
 
 		output::success(format!(
@@ -402,7 +417,7 @@ async fn try_resolve_by_search(
 	hash_type: HashType,
 ) -> Option<ImportedMod> {
 	let hits = modrinth_client
-		.search(slug, Some(5))
+		.search(slug, Some(5), None)
 		.await
 		.map_err(|e| {
 			tracing::warn!("Failed to search for '{slug}': {e}");
@@ -502,34 +517,19 @@ fn extract_overrides_to_memory(
 		for i in 0..archive.len() {
 			let mut zip_file = archive.by_index(i)?;
 			let name = zip_file.name().to_string();
-			let name_normalized = name.replace('\\', "/");
 
-			if !name_normalized.starts_with(&format!("{}/", override_dir)) {
-				continue;
-			}
-
-			let relative_path = &name_normalized[override_dir.len() + 1..];
-			if relative_path.is_empty() {
-				continue;
-			}
-
-			let enclosed = zip_file.enclosed_name();
-			let outpath: PathBuf = match enclosed {
-				Some(path) => {
-					let stripped = path.iter().skip(1).collect::<PathBuf>();
-					root_dir.join(stripped).clean()
-				}
-				None => continue,
-			};
-
-			if !outpath.starts_with(root_dir) {
-				tracing::warn!("Skipping override with path escape: {}", name);
-				continue;
-			}
-
-			if name.ends_with('/') {
-				continue;
-			}
+			let outpath =
+				match classify_archive_entry(&name, override_dir, root_dir) {
+					ExtractDecision::Extract(p) => p,
+					ExtractDecision::Skip => continue,
+					ExtractDecision::Unsafe => {
+						tracing::warn!(
+							"Skipping override with path escape: {}",
+							name
+						);
+						continue;
+					}
+				};
 
 			if outpath.exists() {
 				continue;

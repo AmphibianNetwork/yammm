@@ -167,26 +167,25 @@ async fn download_loader_libraries(
 
 		let download_url = crate::utils::maven::maven_url(&lib.url, &lib.name);
 		tracing::debug!("Downloading {} library: {}", loader_name, lib.name);
-		let response =
-			crate::api::retry::send_retried(client, &download_url, Vec::new())
-				.await
-				.map_err(|e| {
-					ApiError::network_error(format!(
-						"Failed to download {} library {}: {}",
-						loader_name, lib.name, e
-					))
-				})?;
-		if !response.status().is_success() {
-			return Err(ApiError::http(
-				response.status().as_u16(),
-				format!(
-					"Failed to download {} library {} (url: {})",
-					loader_name, lib.name, download_url
-				),
-			));
-		}
-		let bytes = response.bytes().await?;
-		std::fs::write(&dest, &bytes)?;
+		// Fabric/Quilt manifests don't carry hashes for individual library
+		// downloads, so we can't integrity-check here. Streaming still bounds
+		// memory and atomic rename prevents partially-written jars.
+		crate::api::streaming::download_to_file(
+			client,
+			&download_url,
+			&dest,
+			crate::api::streaming::HashPolicy::AcceptedUnhashed {
+				reason: "Fabric/Quilt manifest does not carry per-library hashes",
+			},
+			&lib.name,
+		)
+		.await
+		.map_err(|e| {
+			ApiError::network_error(format!(
+				"Failed to download {} library {}: {}",
+				loader_name, lib.name, e
+			))
+		})?;
 		paths.push(dest);
 	}
 

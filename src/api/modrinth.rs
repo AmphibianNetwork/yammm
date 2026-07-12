@@ -14,17 +14,24 @@ const MODRINTH_API_URL: &str = "https://api.modrinth.com/v2";
 crate::api::define_api_client!(ModrinthClient, MODRINTH_API_URL);
 
 impl ModrinthClient {
-	/// Search for mods using the v2/search endpoint
+	/// Search for mods using the v2/search endpoint.
+	///
+	/// `limit` is clamped server-side to 100; `offset` is 0-based and can be
+	/// used together with `limit` to page through results.
 	pub async fn search(
 		&self,
 		query: &str,
 		limit: Option<usize>,
+		offset: Option<usize>,
 	) -> Result<Vec<ModrinthSearchHit>, ApiError> {
 		let url = format!("{}/search", self.base_url);
 		let mut request = self.client.get(&url).query(&[("query", query)]);
 
 		if let Some(lim) = limit {
-			request = request.query(&[("limit", lim.to_string())]);
+			request = request.query(&[("limit", lim)]);
+		}
+		if let Some(off) = offset {
+			request = request.query(&[("offset", off)]);
 		}
 
 		let full_url = request.build()?.url().to_string();
@@ -37,6 +44,7 @@ impl ModrinthClient {
 
 	/// Resolve a mod slug or ID to its actual project ID
 	/// This handles both slugs (like "emi") and actual IDs (like "fRiHVvU7")
+	#[allow(dead_code)] // exposed for callers that need the canonical ID
 	pub async fn resolve_mod_id(
 		&self,
 		mod_identifier: &str,
@@ -57,7 +65,7 @@ impl ModrinthClient {
 			Err(e) => return Err(e),
 		}
 
-		let hits = self.search(mod_identifier, Some(10)).await?;
+		let hits = self.search(mod_identifier, Some(10), None).await?;
 
 		for hit in &hits {
 			if hit.slug == mod_identifier || hit.project_id == mod_identifier {
@@ -90,9 +98,8 @@ impl ModrinthClient {
 		mod_identifier: &str,
 	) -> Result<ModrinthSearchHit, ApiError> {
 		let url = format!("{}/project/{}", self.base_url, mod_identifier);
-		let response = self.send_retried(&url, Vec::new()).await?;
-		let response = Self::ensure_success(response)?;
-		let project: ModrinthProject = response.json().await?;
+		let project: ModrinthProject =
+			self.fetch_json_cached(&url, Vec::new()).await?;
 		Ok(project.into_search_hit())
 	}
 
@@ -107,7 +114,7 @@ impl ModrinthClient {
 		let base =
 			format!("{}/project/{}/version", self.base_url, mod_identifier);
 		let url = self.build_versions_url(&base, minecraft_version, loader)?;
-		self.fetch_json(&url, Vec::new()).await
+		self.fetch_json_cached(&url, Vec::new()).await
 	}
 
 	/// Get a specific version by ID
@@ -116,10 +123,11 @@ impl ModrinthClient {
 		version_id: &str,
 	) -> Result<ModrinthVersion, ApiError> {
 		let url = format!("{}/version/{}", self.base_url, version_id);
-		self.fetch_json(&url, Vec::new()).await
+		self.fetch_json_cached(&url, Vec::new()).await
 	}
 
 	/// Get the latest version for a mod with server-side filtering
+	#[allow(dead_code)] // direct-client equivalent of Provider::get_latest_version
 	pub async fn get_latest_version(
 		&self,
 		mod_identifier: &str,
@@ -133,7 +141,7 @@ impl ModrinthClient {
 		let url = self.build_versions_url(&base, minecraft_version, loader)?;
 
 		let versions: Vec<ModrinthVersion> =
-			self.fetch_json(&url, Vec::new()).await?;
+			self.fetch_json_cached(&url, Vec::new()).await?;
 
 		versions.into_iter().next().ok_or_else(|| {
 			ApiError::not_found(format!(
@@ -314,6 +322,7 @@ pub struct ModrinthDependency {
 
 impl ModrinthDependency {
 	/// Check if this is a required dependency
+	#[allow(dead_code)] // helper on the raw response type; callers usually go through DependencyKind
 	pub fn is_required(&self) -> bool {
 		matches!(self.dependency_type.as_str(), "required")
 	}
@@ -541,7 +550,7 @@ mod tests {
 
 		let client =
 			ModrinthClient::new().with_base_url(format!("{}/v2", server.url()));
-		let hits = client.search("jei", None).await.unwrap();
+		let hits = client.search("jei", None, None).await.unwrap();
 		assert_eq!(hits.len(), 1);
 		assert_eq!(hits[0].slug, "jei");
 		assert_eq!(hits[0].title, "Just Enough Items");

@@ -413,3 +413,95 @@ fn merge_libraries_recursive(
 	}
 	Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::io::Write;
+
+	// ---- deduplicate_classpath ----
+
+	#[test]
+	fn test_dedup_empty_names_is_identity() {
+		let mut jars = vec![
+			PathBuf::from("/lib/a-1.0.jar"),
+			PathBuf::from("/lib/b-2.0.jar"),
+		];
+		let original = jars.clone();
+		deduplicate_classpath(&mut jars, &[]);
+		assert_eq!(jars, original);
+	}
+
+	#[test]
+	fn test_dedup_single_name_removes_matches() {
+		let mut jars = vec![
+			PathBuf::from("/lib/asm-9.2.jar"),
+			PathBuf::from("/lib/guava-31.0.jar"),
+			PathBuf::from("/lib/asm-tree-9.2.jar"),
+		];
+		deduplicate_classpath(&mut jars, &["asm".to_string()]);
+		// Both "asm" matches (substring) get filtered; only guava remains.
+		assert_eq!(jars, vec![PathBuf::from("/lib/guava-31.0.jar")]);
+	}
+
+	#[test]
+	fn test_dedup_multiple_names_combine() {
+		let mut jars = vec![
+			PathBuf::from("/lib/asm-9.2.jar"),
+			PathBuf::from("/lib/guava-31.0.jar"),
+			PathBuf::from("/lib/jopt-simple-5.0.jar"),
+		];
+		deduplicate_classpath(
+			&mut jars,
+			&["asm".to_string(), "guava".to_string()],
+		);
+		assert_eq!(jars, vec![PathBuf::from("/lib/jopt-simple-5.0.jar")]);
+	}
+
+	// ---- is_bundler_jar ----
+
+	#[test]
+	fn test_is_bundler_jar_nonexistent_path_returns_false() {
+		assert!(!is_bundler_jar(Path::new(
+			"/definitely-not-a-real-path-xyz123.jar"
+		)));
+	}
+
+	#[test]
+	fn test_is_bundler_jar_zip_without_marker_returns_false() {
+		let tmp = tempfile::tempdir().unwrap();
+		let jar = tmp.path().join("plain.jar");
+		let file = std::fs::File::create(&jar).unwrap();
+		let mut zip = zip::ZipWriter::new(file);
+		zip.start_file::<_, ()>("META-INF/MANIFEST.MF", Default::default())
+			.unwrap();
+		zip.write_all(b"Manifest-Version: 1.0\n").unwrap();
+		zip.finish().unwrap();
+
+		assert!(!is_bundler_jar(&jar));
+	}
+
+	#[test]
+	fn test_is_bundler_jar_with_marker_returns_true() {
+		let tmp = tempfile::tempdir().unwrap();
+		let jar = tmp.path().join("bundler.jar");
+		let file = std::fs::File::create(&jar).unwrap();
+		let mut zip = zip::ZipWriter::new(file);
+		zip.start_file::<_, ()>("META-INF/versions.list", Default::default())
+			.unwrap();
+		zip.write_all(b"1.20.4 1234abcd minecraft-server.jar\n")
+			.unwrap();
+		zip.finish().unwrap();
+
+		assert!(is_bundler_jar(&jar));
+	}
+
+	#[test]
+	fn test_is_bundler_jar_non_zip_file_returns_false() {
+		let tmp = tempfile::tempdir().unwrap();
+		let jar = tmp.path().join("garbage.jar");
+		std::fs::write(&jar, b"this is not a zip file").unwrap();
+
+		assert!(!is_bundler_jar(&jar));
+	}
+}

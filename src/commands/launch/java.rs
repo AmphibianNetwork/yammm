@@ -369,28 +369,33 @@ async fn install_jdk(
 	let archive_path = temp_dir.join(&asset.file_name);
 
 	output::bullet(format!("Downloading {}...", asset.file_name));
-	let response = http_client.get(&asset.download_url).send().await?;
-	if !response.status().is_success() {
-		return Err(crate::errors::YammmError::download_failed(format!(
-			"Failed to download JDK: HTTP {}",
-			response.status()
-		))
-		.into());
-	}
-	let bytes = response.bytes().await?;
-
-	if asset.checksum_type == "sha256" {
-		let computed = crate::types::HashType::Sha256.compute_for_bytes(&bytes);
-		if computed != asset.checksum {
-			return Err(crate::errors::YammmError::download_failed(format!(
-				"JDK checksum mismatch (expected {}, got {})",
-				asset.checksum, computed
-			))
-			.into());
+	// JDK archives are 100–200 MB; stream them. Adoptium publishes a checksum
+	// alongside each release — verify it when it's SHA-256 (their default).
+	let policy = if asset.checksum_type == "sha256" {
+		crate::api::streaming::HashPolicy::Required(
+			crate::api::streaming::ExpectedHash {
+				hash_type: crate::types::HashType::Sha256,
+				hex: &asset.checksum,
+			},
+		)
+	} else {
+		crate::api::streaming::HashPolicy::AcceptedUnhashed {
+			reason: "Adoptium asset checksum is not sha256",
 		}
+	};
+	if archive_path.exists() {
+		// Stale tmp from a previous failed extract — wipe so the streaming
+		// helper actually runs (it short-circuits on dest existing).
+		let _ = std::fs::remove_file(&archive_path);
 	}
-
-	std::fs::write(&archive_path, &bytes)?;
+	crate::api::streaming::download_to_file(
+		http_client,
+		&asset.download_url,
+		&archive_path,
+		policy,
+		&asset.file_name,
+	)
+	.await?;
 
 	output::bullet("Extracting JDK...");
 	let extract_tmp = temp_dir.join(format!("extract-{}", major_version));

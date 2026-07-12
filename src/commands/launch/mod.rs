@@ -49,22 +49,29 @@ static CHILD_PID: std::sync::atomic::AtomicU32 =
 fn install_signal_handlers() {
 	#[cfg(unix)]
 	{
+		// SIGINT (Ctrl-C) goes through `ctrlc`, which runs its handler on a
+		// dedicated thread via a self-pipe — so we can freely call non
+		// async-signal-safe code (atomic stores, libc::kill).
 		let _ = ctrlc::set_handler(|| {
 			INTERRUPTED.store(true, Ordering::Release);
 			let pid = CHILD_PID.load(Ordering::Acquire);
 			if pid > 0 {
+				// SAFETY: `kill` is async-signal-safe; `pid` is a valid PID
+				// we recorded after spawn. The worst-case race is that the
+				// child has already exited, in which case `kill` is a no-op
+				// returning ESRCH which we ignore.
 				unsafe {
 					libc::kill(pid as i32, libc::SIGINT);
 				}
 			}
 		});
 
-		unsafe {
-			libc::signal(
-				libc::SIGTERM,
-				sigterm_handler as *const () as libc::sighandler_t,
-			);
-		}
+		// SIGTERM is installed via sigaction(2), not the deprecated signal(3).
+		// signal(3)'s reset-to-default-on-delivery semantics differ across
+		// systems (System V vs BSD); sigaction is the portable, well-defined
+		// API. The handler body still must be async-signal-safe: only atomic
+		// load/store, libc::kill, and libc::_exit.
+		install_sigaction(libc::SIGTERM, sigterm_handler);
 	}
 	#[cfg(windows)]
 	{
@@ -81,13 +88,41 @@ fn install_signal_handlers() {
 }
 
 #[cfg(unix)]
+fn install_sigaction(
+	signum: libc::c_int,
+	handler: extern "C" fn(libc::c_int),
+) {
+	// SAFETY: `sigaction` is the POSIX-defined way to install a signal
+	// handler. We zero-initialize the struct, set the handler pointer, and
+	// clear the mask so all signals can interrupt the handler — but we
+	// don't actually do anything inside that would care, since the handler
+	// only calls async-signal-safe functions.
+	unsafe {
+		let mut sa: libc::sigaction = std::mem::zeroed();
+		sa.sa_sigaction = handler as libc::sighandler_t;
+		libc::sigemptyset(&mut sa.sa_mask);
+		// SA_RESTART so an in-flight read()/write() retries rather than
+		// failing with EINTR when SIGTERM arrives during shutdown.
+		sa.sa_flags = libc::SA_RESTART;
+		let _ = libc::sigaction(signum, &sa, std::ptr::null_mut());
+	}
+}
+
+/// SIGTERM handler. **Must remain async-signal-safe.** Only call libc
+/// functions documented in POSIX `signal-safety(7)`: `kill`, `_exit`,
+/// `write`, atomic load/store (these are not formally guaranteed in a
+/// signal handler but are safe in practice on all supported platforms).
+#[cfg(unix)]
 extern "C" fn sigterm_handler(_sig: libc::c_int) {
 	let pid = CHILD_PID.load(Ordering::Acquire);
 	if pid > 0 {
+		// SAFETY: `kill` is async-signal-safe. See install_signal_handlers.
 		unsafe {
 			libc::kill(pid as i32, libc::SIGTERM);
 		}
 	}
+	// SAFETY: `_exit` is async-signal-safe. We use 143 = 128 + SIGTERM, the
+	// conventional shell-reported exit code for a process killed by SIGTERM.
 	unsafe {
 		libc::_exit(143);
 	}
@@ -375,5 +410,154 @@ mod tests {
 			cp,
 			format!("/a/b.jar{}/c/d.jar", crate::utils::CLASSPATH_SEPARATOR)
 		);
+	}
+
+	// ---- resolve_jvm_args ----
+
+	#[test]
+	fn test_resolve_jvm_args_substitutes_library_directory() {
+		let args = vec!["-DlibDir=${library_directory}".to_string()];
+		let result =
+			resolve_jvm_args(&args, Path::new("/loader/libs"), "1.20.4");
+		assert_eq!(result, vec!["-DlibDir=/loader/libs"]);
+	}
+
+	#[test]
+	fn test_resolve_jvm_args_substitutes_classpath_separator() {
+		let args = vec!["a${classpath_separator}b".to_string()];
+		let result = resolve_jvm_args(&args, Path::new("/x"), "1.20.4");
+		assert_eq!(
+			result,
+			vec![format!("a{}b", crate::utils::CLASSPATH_SEPARATOR)]
+		);
+	}
+
+	#[test]
+	fn test_resolve_jvm_args_substitutes_version_name() {
+		let args = vec!["mc-${version_name}".to_string()];
+		let result = resolve_jvm_args(&args, Path::new("/x"), "1.20.4");
+		assert_eq!(result, vec!["mc-1.20.4"]);
+	}
+
+	#[test]
+	fn test_resolve_jvm_args_multiple_placeholders_in_one_arg() {
+		let args = vec![
+			"${library_directory}${classpath_separator}${version_name}"
+				.to_string(),
+		];
+		let result = resolve_jvm_args(&args, Path::new("/loader"), "1.21");
+		assert_eq!(
+			result,
+			vec![format!("/loader{}1.21", crate::utils::CLASSPATH_SEPARATOR)]
+		);
+	}
+
+	#[test]
+	fn test_resolve_jvm_args_passes_through_args_without_placeholders() {
+		let args = vec!["-Xmx2G".to_string(), "-Dprop=val".to_string()];
+		let result = resolve_jvm_args(&args, Path::new("/x"), "1.20.4");
+		assert_eq!(result, vec!["-Xmx2G", "-Dprop=val"]);
+	}
+
+	// ---- extract_module_path_jars ----
+
+	#[test]
+	fn test_extract_module_path_no_p_flag_returns_empty() {
+		let args = vec!["-Xmx2G".to_string(), "-cp".to_string()];
+		assert!(extract_module_path_jars(&args).is_empty());
+	}
+
+	#[test]
+	fn test_extract_module_path_includes_only_existing_paths() {
+		let tmp = tempfile::tempdir().unwrap();
+		let real = tmp.path().join("real.jar");
+		std::fs::write(&real, b"jar").unwrap();
+		let fake = tmp.path().join("fake.jar");
+
+		let module_path = format!(
+			"{}{}{}",
+			real.display(),
+			crate::utils::CLASSPATH_SEPARATOR,
+			fake.display()
+		);
+		let args = vec!["-p".to_string(), module_path];
+		let result = extract_module_path_jars(&args);
+
+		assert_eq!(result, vec![real]);
+	}
+
+	#[test]
+	fn test_extract_module_path_multiple_p_blocks_accumulate() {
+		let tmp = tempfile::tempdir().unwrap();
+		let a = tmp.path().join("a.jar");
+		let b = tmp.path().join("b.jar");
+		std::fs::write(&a, b"a").unwrap();
+		std::fs::write(&b, b"b").unwrap();
+
+		let args = vec![
+			"-p".to_string(),
+			a.display().to_string(),
+			"--something".to_string(),
+			"-p".to_string(),
+			b.display().to_string(),
+		];
+		let result = extract_module_path_jars(&args);
+
+		assert_eq!(result, vec![a, b]);
+	}
+
+	// ---- build_java_command ----
+
+	#[test]
+	fn test_build_java_command_uses_prefix_program_and_args() {
+		let prefix = vec!["sudo".to_string(), "-E".to_string()];
+		let java_args =
+			vec!["-cp".to_string(), "foo.jar".to_string(), "Main".to_string()];
+		let cmd = build_java_command(
+			Path::new("/usr/bin/java"),
+			&prefix,
+			java_args,
+			None,
+		)
+		.unwrap();
+
+		// Program is the first prefix entry, not java_path (the path is for
+		// reference; java_prefix carries the actual invocation).
+		assert_eq!(cmd.get_program(), "sudo");
+
+		let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+		// Order: prefix[1..] then java_args
+		assert_eq!(args[0], "-E");
+		assert_eq!(args[1], "-cp");
+		assert_eq!(args[2], "foo.jar");
+		assert_eq!(args[3], "Main");
+	}
+
+	#[test]
+	fn test_build_java_command_sets_current_dir_when_some() {
+		let prefix = vec!["java".to_string()];
+		let cmd = build_java_command(
+			Path::new("/usr/bin/java"),
+			&prefix,
+			vec!["-version".to_string()],
+			Some(Path::new("/work")),
+		)
+		.unwrap();
+
+		assert_eq!(cmd.get_current_dir(), Some(Path::new("/work")));
+	}
+
+	#[test]
+	fn test_build_java_command_no_current_dir_when_none() {
+		let prefix = vec!["java".to_string()];
+		let cmd = build_java_command(
+			Path::new("/usr/bin/java"),
+			&prefix,
+			vec!["-version".to_string()],
+			None,
+		)
+		.unwrap();
+
+		assert!(cmd.get_current_dir().is_none());
 	}
 }

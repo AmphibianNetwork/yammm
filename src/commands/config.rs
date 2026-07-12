@@ -48,6 +48,7 @@ impl ConfigCommand {
 
 		match self.command {
 			ConfigSubcommand::Edit => {
+				output::require_json_support("config edit")?;
 				let path = crate::config::GlobalConfig::config_path()
 					.ok_or_else(|| {
 						crate::errors::YammmError::config_error(
@@ -73,24 +74,45 @@ impl ConfigCommand {
 				}
 			}
 			ConfigSubcommand::Show => {
-				output::heading("Global configuration");
-				let mut display_config = ctx.global.clone();
+				let mut display_config = ctx.global().clone();
 				if let Some(ref key) = display_config.api_keys.curseforge {
 					display_config.api_keys.curseforge = Some(redact_key(key));
 				}
+				if output::is_json_mode() {
+					output::emit_json(&display_config)?;
+					return Ok(());
+				}
+				output::heading("Global configuration");
 				let toml_string = toml::to_string_pretty(&display_config)?;
-				println!("{}", toml_string);
+				output::raw_block(&toml_string);
 			}
 			ConfigSubcommand::Get { key } => {
-				let val = get_config_value(&ctx.global, &key)?;
-				println!("{}", val);
+				let val = get_config_value(ctx.global(), &key)?;
+				if output::is_json_mode() {
+					output::emit_json(&serde_json::json!({
+						"key": format!("{:?}", key),
+						"value": val,
+					}))?;
+					return Ok(());
+				}
+				output::raw_line(&val);
 			}
 			ConfigSubcommand::Set { key, value } => {
-				set_config_value(&mut ctx.global, &key, &value)?;
-				ctx.global.save()?;
+				set_config_value(ctx.global_mut(), &key, &value)?;
+				ctx.global().save()?;
+				if output::is_json_mode() {
+					output::emit_json(&serde_json::json!({
+						"command": "config set",
+						"key": format!("{:?}", key),
+						"value": value,
+						"status": "updated",
+					}))?;
+					return Ok(());
+				}
 				output::success("Configuration updated.");
 			}
 			ConfigSubcommand::Reset => {
+				output::require_json_support("config reset")?;
 				let proceed = dialoguer::Confirm::new()
 					.with_prompt("Reset global configuration to defaults?")
 					.default(false)

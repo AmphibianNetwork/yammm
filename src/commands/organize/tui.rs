@@ -147,13 +147,9 @@ fn handle_key(
 					if dest.idx == 3 {
 						if let Some(config) = app.current_config() {
 							let relative = config.rel_path.clone();
-							if app.result.ignored_new.is_none() {
-								app.result.ignored_new = Some(Vec::new());
-							}
 							app.result
 								.ignored_new
-								.as_mut()
-								.unwrap()
+								.get_or_insert_with(Vec::new)
 								.push(relative);
 							app.result.ignored_count += 1;
 						}

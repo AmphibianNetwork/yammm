@@ -97,6 +97,7 @@ impl AdoptiumClient {
 }
 
 pub struct AdoptiumAsset {
+	#[allow(dead_code)] // kept for completeness of the Adoptium response model
 	pub major_version: i32,
 	pub download_url: String,
 	pub checksum: String,

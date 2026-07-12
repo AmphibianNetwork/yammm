@@ -17,11 +17,14 @@ use std::sync::Arc;
 
 use crate::api::CurseForgeClient;
 use crate::api::error::ApiError;
+use crate::providers::error::{ProviderError, ProviderResult};
 use crate::providers::provider::{ModSourceProvider, SearchFilters};
 use crate::types::{
-	ModEnv, ModInfo, ModVersion, SourceDependency, VersionFilters,
+	ModEnv, ModInfo, ModVersion, ProjectType, SourceDependency, VersionFilters,
 };
 use anyhow::Result;
+
+const SOURCE: &str = "curseforge";
 
 /// Log a warning when rate-limited, suggesting the user add an API key
 /// for higher rate limits (unauthenticated access is heavily throttled).
@@ -30,6 +33,27 @@ fn log_rate_limit_warning(err: &ApiError) {
 		tracing::warn!(
 			"CurseForge API rate limited. Consider setting api_keys.curseforge in your config for higher rate limits."
 		);
+	}
+}
+
+fn map_cf_error(err: ApiError) -> ProviderError {
+	log_rate_limit_warning(&err);
+	ProviderError::from_api_error(err, SOURCE)
+}
+
+fn map_cf_error_for_mod(
+	err: ApiError,
+	mod_id: i64,
+) -> ProviderError {
+	log_rate_limit_warning(&err);
+	match err {
+		ApiError::NotFound(_) | ApiError::Http { status: 404, .. } => {
+			ProviderError::NotFound {
+				provider: SOURCE,
+				what: mod_id.to_string(),
+			}
+		}
+		other => ProviderError::from_api_error(other, SOURCE),
 	}
 }
 
@@ -95,33 +119,39 @@ impl ModSourceProvider for CurseForgeSource {
 
 	fn get_mod_env(
 		&self,
-		_mod_info: &ModInfo,
+		mod_info: &ModInfo,
 	) -> ModEnv {
-		ModEnv::Both
+		// The CurseForge API doesn't expose per-side flags the way Modrinth's
+		// `client_side` / `server_side` fields do, so we can't tell whether an
+		// arbitrary mod is client-only or server-only. Resource packs and
+		// shaders, however, are always client-side by definition — infer those
+		// from the project type. Everything else falls back to Both.
+		match mod_info.project_type {
+			Some(ProjectType::ResourcePack) | Some(ProjectType::Shader) => {
+				ModEnv::Client
+			}
+			_ => ModEnv::Both,
+		}
 	}
 
 	async fn search(
 		&self,
 		query: &str,
 		filters: &SearchFilters,
-	) -> Result<Vec<ModInfo>> {
+	) -> ProviderResult<Vec<ModInfo>> {
 		self.require_api_key("search")?;
-		let loader_str = filters.version.loader.as_ref().map(|l| l.to_string());
+		let loader_str = filters.version.loader.map(|l| l.as_str());
 		let projects = self
 			.client
 			.search(
 				query,
 				filters.version.minecraft_version.as_deref(),
-				loader_str.as_deref(),
+				loader_str,
+				filters.limit,
+				filters.offset,
 			)
 			.await
-			.map_err(|e| {
-				log_rate_limit_warning(&e);
-				crate::errors::YammmError::network_error(format!(
-					"Search failed: {}",
-					e
-				))
-			})?;
+			.map_err(map_cf_error)?;
 		Ok(projects
 			.into_iter()
 			.map(CurseForgeClient::to_mod_info)
@@ -131,16 +161,14 @@ impl ModSourceProvider for CurseForgeSource {
 	async fn get_mod(
 		&self,
 		mod_id: &str,
-	) -> Result<ModInfo> {
+	) -> ProviderResult<ModInfo> {
 		self.require_api_key("fetching mod info")?;
 		let mod_id = Self::parse_numeric_id(mod_id, "project ID")?;
-		let project = self.client.get_mod(mod_id).await.map_err(|e| {
-			log_rate_limit_warning(&e);
-			crate::errors::YammmError::network_error(format!(
-				"Failed to fetch CurseForge project {}: {}",
-				mod_id, e
-			))
-		})?;
+		let project = self
+			.client
+			.get_mod(mod_id)
+			.await
+			.map_err(|e| map_cf_error_for_mod(e, mod_id))?;
 		Ok(CurseForgeClient::to_mod_info(project))
 	}
 
@@ -148,25 +176,15 @@ impl ModSourceProvider for CurseForgeSource {
 		&self,
 		mod_id: &str,
 		filters: &VersionFilters,
-	) -> Result<Vec<ModVersion>> {
+	) -> ProviderResult<Vec<ModVersion>> {
 		self.require_api_key("fetching versions")?;
 		let mod_id = Self::parse_numeric_id(mod_id, "project ID")?;
-		let loader_str = filters.loader.as_ref().map(|l| l.to_string());
+		let loader_str = filters.loader.map(|l| l.as_str());
 		let files = self
 			.client
-			.get_files(
-				mod_id,
-				filters.minecraft_version.as_deref(),
-				loader_str.as_deref(),
-			)
+			.get_files(mod_id, filters.minecraft_version.as_deref(), loader_str)
 			.await
-			.map_err(|e| {
-				log_rate_limit_warning(&e);
-				crate::errors::YammmError::network_error(format!(
-					"Failed to fetch versions for CurseForge project {}: {}",
-					mod_id, e
-				))
-			})?;
+			.map_err(|e| map_cf_error_for_mod(e, mod_id))?;
 
 		let mut versions = Vec::new();
 		for file in files {
@@ -197,25 +215,21 @@ impl ModSourceProvider for CurseForgeSource {
 		&self,
 		mod_id: &str,
 		version_id: &str,
-	) -> Result<Vec<SourceDependency>> {
+	) -> ProviderResult<Vec<SourceDependency>> {
 		self.require_api_key("fetching dependencies")?;
 		let mod_id = Self::parse_numeric_id(mod_id, "project ID")?;
 		let file_id = Self::parse_numeric_id(version_id, "file ID")?;
 
-		let file = self.client.get_file(file_id).await.map_err(|e| {
-			log_rate_limit_warning(&e);
-			crate::errors::YammmError::network_error(format!(
-				"Failed to fetch CurseForge file {}: {}",
-				version_id, e
-			))
-		})?;
+		let file = self.client.get_file(file_id).await.map_err(map_cf_error)?;
 
 		if file.mod_id != mod_id {
-			return Err(crate::errors::YammmError::invalid_args(format!(
-				"CurseForge file {} does not belong to project {}",
-				version_id, mod_id
-			))
-			.into());
+			return Err(ProviderError::BadResponse {
+				provider: SOURCE,
+				message: format!(
+					"file {} does not belong to project {}",
+					version_id, mod_id
+				),
+			});
 		}
 
 		Ok(CurseForgeClient::to_source_dependencies(&file))
@@ -225,6 +239,51 @@ impl ModSourceProvider for CurseForgeSource {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::types::ModSource;
+
+	fn make_mod_info(project_type: Option<ProjectType>) -> ModInfo {
+		ModInfo {
+			id: "1".to_string(),
+			name: String::new(),
+			description: String::new(),
+			source: ModSource::curseforge("1".to_string()),
+			minecraft_versions: vec![],
+			loaders: vec![],
+			downloads: 0,
+			url: String::new(),
+			project_type,
+			client_side: None,
+			server_side: None,
+		}
+	}
+
+	#[test]
+	fn test_get_mod_env_resourcepack_is_client_only() {
+		let source = CurseForgeSource::new(None, reqwest::Client::new());
+		let info = make_mod_info(Some(ProjectType::ResourcePack));
+		assert_eq!(source.get_mod_env(&info), ModEnv::Client);
+	}
+
+	#[test]
+	fn test_get_mod_env_shader_is_client_only() {
+		let source = CurseForgeSource::new(None, reqwest::Client::new());
+		let info = make_mod_info(Some(ProjectType::Shader));
+		assert_eq!(source.get_mod_env(&info), ModEnv::Client);
+	}
+
+	#[test]
+	fn test_get_mod_env_mod_defaults_to_both() {
+		let source = CurseForgeSource::new(None, reqwest::Client::new());
+		let info = make_mod_info(Some(ProjectType::Mod));
+		assert_eq!(source.get_mod_env(&info), ModEnv::Both);
+	}
+
+	#[test]
+	fn test_get_mod_env_unknown_defaults_to_both() {
+		let source = CurseForgeSource::new(None, reqwest::Client::new());
+		let info = make_mod_info(None);
+		assert_eq!(source.get_mod_env(&info), ModEnv::Both);
+	}
 
 	#[test]
 	fn test_parse_numeric_id_valid() {

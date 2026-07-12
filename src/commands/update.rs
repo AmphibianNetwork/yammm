@@ -13,6 +13,14 @@ use crate::types::VersionFilters;
 pub struct UpdateCommand {
 	#[arg(short = 'y', long)]
 	pub yes: bool,
+
+	/// Report what would update without applying anything.
+	///
+	/// Pairs naturally with `--json` for CI drift detection: a script
+	/// runs `yammm --json update --check-only` on a schedule, parses
+	/// the `updates_available` array, and alerts / files PRs on change.
+	#[arg(long)]
+	pub check_only: bool,
 }
 
 /// A single mod with an available update.
@@ -143,8 +151,8 @@ impl UpdateCommand {
 		let result = check_for_updates(
 			storage,
 			modpack,
-			&ctx.registry,
-			ctx.global.max_concurrent_downloads(),
+			ctx.registry(),
+			ctx.global().max_concurrent_downloads(),
 		)
 		.await?;
 		spin.finish_and_clear();
@@ -160,7 +168,68 @@ impl UpdateCommand {
 			}
 		}
 
+		// --check-only short-circuits before any prompt or write. The
+		// caller just wants to know whether there is drift.
+		if self.check_only {
+			if output::is_json_mode() {
+				let updates_available: Vec<_> = result
+					.updates
+					.iter()
+					.map(|u| {
+						serde_json::json!({
+							"id": u.id,
+							"name": u.name,
+							"current_version": u.current_version,
+							"latest_version": u.latest_version,
+						})
+					})
+					.collect();
+				output::emit_json(&serde_json::json!({
+					"command": "update",
+					"check_only": true,
+					"updates_available": updates_available,
+					"checks_failed": result.failed_checks.iter().map(|(n, e)|
+						serde_json::json!({"name": n, "error": e})
+					).collect::<Vec<_>>(),
+				}))?;
+				return Ok(());
+			}
+			if result.updates.is_empty() {
+				if result.failed_checks.is_empty() {
+					output::success("All up to date.");
+				}
+				return Ok(());
+			}
+			output::blank_line();
+			output::heading(format!(
+				"{} update(s) available (not applied):",
+				result.updates.len()
+			));
+			for update in &result.updates {
+				output::bullet(format!(
+					"{} {}",
+					update.name,
+					output::version_arrow(
+						&update.current_version,
+						&update.latest_version
+					)
+				));
+			}
+			return Ok(());
+		}
+
 		if result.updates.is_empty() {
+			if output::is_json_mode() {
+				output::emit_json(&serde_json::json!({
+					"command": "update",
+					"updated": [],
+					"failed": [],
+					"checks_failed": result.failed_checks.iter().map(|(n, e)|
+						serde_json::json!({"name": n, "error": e})
+					).collect::<Vec<_>>(),
+				}))?;
+				return Ok(());
+			}
 			if result.failed_checks.is_empty() {
 				output::success(
 					"All mods, resource packs, and shader packs are up to date.",
@@ -181,11 +250,16 @@ impl UpdateCommand {
 			));
 		}
 
+		// JSON mode is non-interactive — never prompt.
+		let auto_yes = self.yes || output::is_json_mode();
+
 		let mut updated = 0usize;
 		let mut failed = 0usize;
+		let mut applied: Vec<serde_json::Value> = Vec::new();
+		let mut failed_updates: Vec<serde_json::Value> = Vec::new();
 
 		for update in &result.updates {
-			let should_update = if self.yes {
+			let should_update = if auto_yes {
 				true
 			} else {
 				dialoguer::Confirm::new()
@@ -208,7 +282,7 @@ impl UpdateCommand {
 			match apply_update(
 				storage,
 				update,
-				&ctx.registry,
+				ctx.registry(),
 				config_filters.minecraft_version.as_deref(),
 				config_filters.loader,
 			)
@@ -220,6 +294,12 @@ impl UpdateCommand {
 						update.name, update.latest_version
 					));
 					updated += 1;
+					applied.push(serde_json::json!({
+						"id": update.id,
+						"name": update.name,
+						"from": update.current_version,
+						"to": update.latest_version,
+					}));
 				}
 				Err(e) => {
 					output::error(format!(
@@ -227,8 +307,34 @@ impl UpdateCommand {
 						update.name, e
 					));
 					failed += 1;
+					failed_updates.push(serde_json::json!({
+						"id": update.id,
+						"name": update.name,
+						"error": format!("{}", e),
+					}));
 				}
 			}
+		}
+
+		if output::is_json_mode() {
+			output::emit_json(&serde_json::json!({
+				"command": "update",
+				"updated": applied,
+				"failed": failed_updates,
+				"checks_failed": result.failed_checks.iter().map(|(n, e)|
+					serde_json::json!({"name": n, "error": e})
+				).collect::<Vec<_>>(),
+			}))?;
+			// Keep the non-zero exit code on failure so scripts can branch
+			// on success without parsing JSON if they don't want to.
+			if failed > 0 {
+				return Err(YammmError::download_failed(format!(
+					"{} update(s) failed",
+					failed
+				))
+				.into());
+			}
+			return Ok(());
 		}
 
 		output::blank_line();

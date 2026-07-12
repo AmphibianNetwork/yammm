@@ -14,7 +14,5 @@ pub mod download;
 pub mod mod_install;
 pub mod resolver;
 
-pub use connector::is_connector_installed;
 pub use dep_graph::{cleanup_stale_deps, find_reverse_deps};
-pub use download::{DownloadSummary, download_missing_mods};
-pub use resolver::{DependencyResolver, ResolvedMod};
+pub use download::download_missing_mods;

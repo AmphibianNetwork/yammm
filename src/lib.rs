@@ -14,28 +14,32 @@
 //!       Utils
 //! ```
 //!
-pub mod api;
-pub mod app;
-pub mod auth;
-pub mod cli;
-pub mod commands;
-pub mod config;
-pub mod errors;
-pub mod output;
-pub mod providers;
-pub mod services;
-pub mod storage;
-pub mod types;
-pub mod utils;
+pub(crate) mod api;
+pub(crate) mod app;
+pub(crate) mod auth;
+pub(crate) mod cli;
+pub(crate) mod commands;
+pub(crate) mod config;
+pub(crate) mod errors;
+pub(crate) mod output;
+pub(crate) mod providers;
+pub(crate) mod services;
+pub(crate) mod storage;
+pub(crate) mod types;
+pub(crate) mod utils;
 
 #[cfg(test)]
-pub mod test_util;
+pub(crate) mod test_util;
 
+// Public crate surface — kept deliberately minimal. The binary at
+// `src/bin/yammm.rs` is the only legitimate consumer; everything else stays
+// crate-internal so refactors don't leak across the lib/bin boundary.
 pub use cli::Cli;
 pub use errors::exit_code;
+pub use utils::print_error;
 
 /// Initialize the tracing subscriber. Level: `RUST_LOG` > `--debug` > INFO.
-pub fn init_logging(debug: bool) {
+pub(crate) fn init_logging(debug: bool) {
 	use tracing_subscriber::EnvFilter;
 
 	let default_level = if debug { "debug" } else { "info" };

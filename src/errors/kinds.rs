@@ -126,6 +126,7 @@ impl YammmError {
 		YammmError::General(msg.into())
 	}
 
+	#[allow(dead_code)] // Variant is constructed via From<ApiError>; this factory is reserved for direct callers and tests.
 	pub fn hash_mismatch(
 		name: impl Into<String>,
 		expected: impl Into<String>,

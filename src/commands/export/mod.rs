@@ -48,23 +48,23 @@ impl ExportCommand {
 		let summary = download_missing_mods(
 			&app.storage,
 			&app.cache,
-			&ctx.http_client,
-			ctx.global.max_concurrent_downloads(),
+			ctx.http_client(),
+			ctx.global().max_concurrent_downloads(),
 		)
 		.await?;
 		output::present_download_summary(&summary);
-		if !summary.failed.is_empty() {
-			return Err(crate::errors::YammmError::download_failed(format!(
-				"{} file(s) could not be downloaded",
-				summary.failed.len()
-			))
-			.into());
-		}
+		// Capture the counts before `into_result` consumes the summary —
+		// JSON output reports them at the end.
+		let downloads_completed = summary.downloaded;
+		let downloads_failed = summary.failed.len();
+		summary.into_result()?;
 
 		let output_path = self.generate_output_path(modpack);
 		output::bullet(format!("Output: {}", output_path.display()));
 
-		if !self.yes {
+		// JSON mode is non-interactive; treat as if --yes were passed.
+		let auto_yes = self.yes || output::is_json_mode();
+		if !auto_yes {
 			let proceed = dialoguer::Confirm::new()
 				.with_prompt("Create modpack archive?")
 				.default(true)
@@ -90,6 +90,27 @@ impl ExportCommand {
 				&app.root_dir,
 				&output_path,
 			)?,
+		}
+
+		if output::is_json_mode() {
+			let size = std::fs::metadata(&output_path)
+				.map(|m| m.len())
+				.unwrap_or(0);
+			let format = match self.format {
+				ExportFormat::Mrpack => "mrpack",
+				ExportFormat::Ympk => "ympk",
+			};
+			output::emit_json(&serde_json::json!({
+				"command": "export",
+				"format": format,
+				"output_path": output_path.display().to_string(),
+				"size_bytes": size,
+				"downloads": {
+					"completed": downloads_completed,
+					"failed_count": downloads_failed,
+				},
+			}))?;
+			return Ok(());
 		}
 
 		output::blank_line();

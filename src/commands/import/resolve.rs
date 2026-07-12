@@ -119,7 +119,7 @@ impl ImportCommand {
 		ctx: &AppContext,
 		storage: &crate::storage::Storage,
 	) -> Result<Vec<crate::services::resolver::ResolvedMod>> {
-		let mut resolver = DependencyResolver::new(ctx.registry.clone());
+		let mut resolver = DependencyResolver::new(ctx.registry().clone());
 		if let Some(v) = mc_version {
 			resolver = resolver.with_minecraft_version(v);
 		}
@@ -133,7 +133,8 @@ impl ImportCommand {
 			Err(e) => return Err(e),
 		}
 
-		let mut fabric_resolver = DependencyResolver::new(ctx.registry.clone());
+		let mut fabric_resolver =
+			DependencyResolver::new(ctx.registry().clone());
 		if let Some(v) = mc_version {
 			fabric_resolver = fabric_resolver.with_minecraft_version(v);
 		}

@@ -56,6 +56,7 @@ pub enum CliSource {
 impl CliSource {
 	/// Convert a CLI source + raw identifier into a `ModSource`.
 	/// Detects URLs and file paths first (regardless of `--source`).
+	#[allow(clippy::wrong_self_convention)] // call sites already have an owned CliSource; &self is fine here
 	pub fn to_mod_source(
 		&self,
 		identifier: &str,
@@ -134,11 +135,69 @@ pub enum Command {
 }
 
 impl Command {
+	/// Whether this command supports machine-readable JSON output via the
+	/// global `--json` flag. Commands that return `false` here will reject
+	/// `--json` up front rather than emit nothing or mix text into a JSON
+	/// stream — that lets scripts pin to a stable schema and fail loud
+	/// when they ask for something the binary cannot deliver yet.
+	fn supports_json(&self) -> bool {
+		match self {
+			Command::Info(_)
+			| Command::Search(_)
+			| Command::Cache(_)
+			| Command::Add(_)
+			| Command::Remove(_)
+			| Command::Update(_)
+			| Command::Export(_)
+			| Command::Import(_)
+			| Command::Init(_)
+			| Command::Auth(_)
+			| Command::Config(_) => true,
+			Command::Launch(_)
+			| Command::SelfUpdate(_)
+			| Command::Completions(_) => false,
+			#[cfg(feature = "tui")]
+			Command::Organize(_) | Command::Manage(_) => false,
+		}
+	}
+
+	fn name(&self) -> &'static str {
+		match self {
+			Command::Init(_) => "init",
+			Command::Add(_) => "add",
+			Command::Auth(_) => "auth",
+			Command::Export(_) => "export",
+			Command::Import(_) => "import",
+			Command::Launch(_) => "launch",
+			Command::Remove(_) => "remove",
+			Command::Search(_) => "search",
+			Command::Info(_) => "info",
+			Command::Cache(_) => "cache",
+			Command::Config(_) => "config",
+			Command::Update(_) => "update",
+			Command::SelfUpdate(_) => "self-update",
+			Command::Completions(_) => "completions",
+			#[cfg(feature = "tui")]
+			Command::Organize(_) => "organize",
+			#[cfg(feature = "tui")]
+			Command::Manage(_) => "manage",
+		}
+	}
+
 	/// Dispatch to the appropriate command's `run` method.
 	pub async fn run(
 		self,
 		ctx: AppContext,
 	) -> anyhow::Result<()> {
+		if crate::output::is_json_mode() && !self.supports_json() {
+			return Err(crate::errors::YammmError::invalid_args(format!(
+				"command '{}' does not yet support --json output. \
+				 Run without --json, or open an issue requesting JSON for this command.",
+				self.name()
+			))
+			.into());
+		}
+
 		match self {
 			Command::Init(cmd) => cmd.run(ctx).await,
 			Command::Add(cmd) => cmd.run(ctx).await,

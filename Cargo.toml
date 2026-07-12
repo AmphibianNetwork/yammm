@@ -82,6 +82,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 ron = "0.8"
+semver = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -120,6 +121,7 @@ embed-resource = "3"
 
 [dev-dependencies]
 mockito = "1.7.2"
+proptest = { version = "1", default-features = false, features = ["std"] }
 tempfile = "3"
 
 # The profile that 'dist' will build with

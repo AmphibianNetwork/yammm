@@ -13,6 +13,7 @@
 //! 5. (Optional) Add a `CliSource` variant in `commands/mod.rs`
 
 pub mod curseforge;
+pub mod error;
 pub mod modrinth;
 pub mod provider;
 pub mod registry;
@@ -21,5 +22,5 @@ pub mod url;
 #[cfg(test)]
 pub mod mock;
 
-pub use provider::{ModSourceProvider, Provider, SearchFilters};
+pub use provider::{Provider, SearchFilters};
 pub use registry::{SourceKey, SourceRegistry};

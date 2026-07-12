@@ -31,6 +31,7 @@ impl GitHubClient {
 	}
 
 	/// Fetches a single release by its tag name.
+	#[allow(dead_code)] // tag lookup will be wired in when version pinning lands
 	pub async fn get_release_by_tag(
 		&self,
 		owner: &str,

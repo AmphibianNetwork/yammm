@@ -22,11 +22,17 @@ const CF_SHADER_CLASS_ID: i64 = 6552;
 crate::api::define_api_client!(CurseForgeClient, CURSEFORGE_API_URL, api_key);
 
 impl CurseForgeClient {
+	/// Search for mods using the v1/mods/search endpoint.
+	///
+	/// CurseForge calls the offset parameter `index` and clamps `pageSize`
+	/// at 50. Both are 0-based.
 	pub async fn search(
 		&self,
 		query: &str,
 		minecraft_version: Option<&str>,
 		loader: Option<&str>,
+		limit: Option<usize>,
+		offset: Option<usize>,
 	) -> Result<Vec<CfProject>, ApiError> {
 		let url = format!("{}/v1/mods/search", self.base_url);
 		let mut req = self.client.get(&url);
@@ -40,6 +46,12 @@ impl CurseForgeClient {
 		}
 		if let Some(ldr) = loader {
 			req = req.query(&[("modLoaderType", cf_loader_type(ldr))]);
+		}
+		if let Some(lim) = limit {
+			req = req.query(&[("pageSize", lim)]);
+		}
+		if let Some(off) = offset {
+			req = req.query(&[("index", off)]);
 		}
 
 		// We build the request to compute the full URL (with query params),
@@ -60,9 +72,8 @@ impl CurseForgeClient {
 	) -> Result<CfProject, ApiError> {
 		let url = format!("{}/v1/mods/{}", self.base_url, mod_id);
 		let headers = self.auth_headers();
-		let response = self.send_retried(&url, headers).await?;
-		let response = Self::ensure_success(response)?;
-		let result: CfModResponse = response.json().await?;
+		let result: CfModResponse =
+			self.fetch_json_cached(&url, headers).await?;
 		Ok(result.data)
 	}
 
@@ -72,9 +83,8 @@ impl CurseForgeClient {
 	) -> Result<CfFile, ApiError> {
 		let url = format!("{}/v1/mods/files/{}", self.base_url, file_id);
 		let headers = self.auth_headers();
-		let response = self.send_retried(&url, headers).await?;
-		let response = Self::ensure_success(response)?;
-		let result: CfFileListResponse = response.json().await?;
+		let result: CfFileListResponse =
+			self.fetch_json_cached(&url, headers).await?;
 		result
 			.data
 			.into_iter()
@@ -104,8 +114,8 @@ impl CurseForgeClient {
 		let full_url = req.build()?.url().to_string();
 		let headers = self.auth_headers();
 
-		let response = self.send_retried(&full_url, headers).await?;
-		let result: CfFileListResponse = response.json().await?;
+		let result: CfFileListResponse =
+			self.fetch_json_cached(&full_url, headers).await?;
 		Ok(result.data)
 	}
 
@@ -124,9 +134,9 @@ impl CurseForgeClient {
 		Ok(result.data)
 	}
 
-	fn auth_headers(&self) -> Vec<(String, String)> {
+	fn auth_headers(&self) -> Vec<(&'static str, String)> {
 		match &self.api_key {
-			Some(key) => vec![("x-api-key".to_string(), key.clone())],
+			Some(key) => vec![("x-api-key", key.clone())],
 			None => Vec::new(),
 		}
 	}

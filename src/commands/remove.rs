@@ -48,6 +48,14 @@ impl RemoveCommand {
 
 		let mut to_remove = vec![(slug.clone(), mod_ron.name.clone())];
 
+		// JSON mode is intentionally non-interactive: prompts would
+		// either hang or fail when stdin is piped. Treat it as
+		// `--yes --force` (remove only the target, leave dependents),
+		// matching how scripts already expect non-interactive tools to
+		// behave.
+		let non_interactive = self.yes || output::is_json_mode();
+		let force = self.force || output::is_json_mode();
+
 		if !dependents.is_empty() {
 			output::warning(format!(
 				"{} mods depend on {}:",
@@ -58,9 +66,9 @@ impl RemoveCommand {
 				output::bullet(&dep.1);
 			}
 
-			if self.force {
+			if force {
 				output::dim("--force used. Will remove only this mod.");
-			} else if !self.yes {
+			} else if !non_interactive {
 				let remove_dependents = dialoguer::Confirm::new()
 					.with_prompt("Remove dependent mods as well?")
 					.default(false)
@@ -81,7 +89,7 @@ impl RemoveCommand {
 					}
 				}
 			}
-		} else if !self.yes {
+		} else if !non_interactive {
 			let proceed = dialoguer::Confirm::new()
 				.with_prompt(format!(
 					"Are you sure you want to remove {}?",
@@ -95,11 +103,24 @@ impl RemoveCommand {
 			}
 		}
 
+		let mut removed = Vec::with_capacity(to_remove.len());
 		for (mod_slug, mod_name) in to_remove {
 			let (pt, _) = storage.find_any(&mod_slug)?;
 			storage.remove(pt, &mod_slug)?;
 			cleanup_stale_deps(storage, &mod_slug, &mod_ron.source)?;
 			output::success(format!("Removed {} from modpack", mod_name));
+			removed.push(serde_json::json!({
+				"id": mod_slug,
+				"name": mod_name,
+				"project_type": pt.as_str(),
+			}));
+		}
+
+		if output::is_json_mode() {
+			output::emit_json(&serde_json::json!({
+				"command": "remove",
+				"removed": removed,
+			}))?;
 		}
 
 		Ok(())

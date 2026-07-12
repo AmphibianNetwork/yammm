@@ -360,3 +360,222 @@ fn copy_dir_recursive(
 	}
 	Ok(())
 }
+
+#[cfg(test)]
+mod golden_tests {
+	use super::*;
+	use crate::config::LoaderConfig;
+	use crate::storage::{JarCache, Storage};
+	use crate::types::{
+		HashType, LoaderType, ModEnv, ModSource, ProjectType, TrackedMod,
+	};
+
+	// Golden file for the MRPACK `modrinth.index.json` shape. If you change the
+	// `MrpackIndex` schema or how `from_modpack` populates it, update this
+	// string. The test exists to catch *accidental* drift — Modrinth's spec is
+	// loose enough that two valid implementations can still be mutually
+	// incompatible.
+	// Key order is alphabetical because we canonicalize through
+	// `serde_json::Value` (which uses a BTreeMap). `fileSize: 0` reflects
+	// the real exporter behavior when the cache has no entry for the mod
+	// — file_size falls back to 0 — and is captured here so accidental
+	// changes to that fallback surface in CI.
+	const EXPECTED_INDEX_JSON: &str = r#"{
+  "dependencies": {
+    "fabric-loader": "0.16.5",
+    "minecraft": "1.20.4"
+  },
+  "files": [
+    {
+      "downloads": [
+        "https://example.com/sodium.jar"
+      ],
+      "env": {
+        "client": "required",
+        "server": "unsupported"
+      },
+      "fileSize": 0,
+      "hashes": {
+        "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "path": "mods/sodium.jar"
+    }
+  ],
+  "formatVersion": 1,
+  "game": "minecraft",
+  "name": "Golden Pack",
+  "summary": "Fixture for golden test",
+  "versionId": "1.0.0"
+}"#;
+
+	/// Build a TrackedMod that looks like what `add` would produce after
+	/// resolving a Modrinth mod, downloading the JAR, and writing the entry.
+	fn fixture_tracked_mod() -> TrackedMod {
+		TrackedMod {
+			id: "sodium".to_string(),
+			name: "Sodium".to_string(),
+			description: String::new(),
+			version: "0.5.0".to_string(),
+			source: ModSource::modrinth("sodium"),
+			dependencies: Vec::new(),
+			url: String::new(),
+			download_url: "https://example.com/sodium.jar".to_string(),
+			hash: Some("a".repeat(40)),
+			hash_type: HashType::Sha1,
+			project_type: ProjectType::Mod,
+			env: ModEnv::Client,
+			categories: Vec::new(),
+			filename: Some("sodium.jar".to_string()),
+			unresolved: false,
+			connector_compat: false,
+		}
+	}
+
+	fn fixture_manifest() -> ModpackManifest {
+		ModpackManifest {
+			name: "Golden Pack".to_string(),
+			description: "Fixture for golden test".to_string(),
+			version: "1.0.0".to_string(),
+			minecraft_version: "1.20.4".to_string(),
+			loader: LoaderConfig {
+				loader: Some(LoaderType::Fabric),
+				version: "0.16.5".to_string(),
+			},
+			mod_path: None,
+			resource_pack_path: None,
+			shader_pack_path: None,
+		}
+	}
+
+	#[test]
+	fn mrpack_index_matches_golden_for_fixture_modpack() {
+		// Build a fully in-memory modpack: one Fabric mod for MC 1.20.4 with a
+		// known SHA-1 hash, client-only, no resource packs or shaders.
+		let tmp = tempfile::TempDir::new().unwrap();
+		let root = tmp.path();
+
+		let manifest = fixture_manifest();
+		let storage = Storage::new(root, &manifest);
+		std::fs::create_dir_all(&storage.mods_dir).unwrap();
+		std::fs::create_dir_all(&storage.resourcepacks_dir).unwrap();
+		std::fs::create_dir_all(&storage.shaderpacks_dir).unwrap();
+
+		let tracked = fixture_tracked_mod();
+		storage.save(ProjectType::Mod, "sodium", &tracked).unwrap();
+
+		let cache = JarCache::new(root.join("cache"));
+
+		let index =
+			MrpackIndex::from_modpack(&manifest, &storage, &cache).unwrap();
+
+		// Canonicalize: serde_json::Value emits maps in sorted key order, so
+		// going through Value before `to_string_pretty` neutralizes HashMap
+		// iteration order in the `dependencies` field.
+		let value: serde_json::Value = serde_json::to_value(&index).unwrap();
+		let actual = serde_json::to_string_pretty(&value).unwrap();
+
+		assert_eq!(
+			actual, EXPECTED_INDEX_JSON,
+			"MRPACK index drifted from golden — update EXPECTED_INDEX_JSON if intentional"
+		);
+	}
+
+	/// Full export → re-parse roundtrip. Catches "we wrote a field that we
+	/// can't read back" and "the zip layout drifted from what import expects."
+	///
+	/// We don't drive the `add` or `import` commands directly because both
+	/// involve network calls (provider lookups, JAR downloads) that would
+	/// need a mockito server and a real cached JAR to make the export step
+	/// succeed end-to-end. The path we *do* cover is the lossless one: the
+	/// `TrackedMod` that `add` would persist, after `export`, after pulling
+	/// the index back out of the zip, still parses into an `MrpackIndex`
+	/// with the same shape — which is precisely what the importer reads.
+	#[test]
+	fn export_to_mrpack_roundtrips_through_reparse() {
+		use std::io::Read;
+
+		let tmp = tempfile::TempDir::new().unwrap();
+		let root = tmp.path();
+
+		let manifest = fixture_manifest();
+		let storage = Storage::new(root, &manifest);
+		std::fs::create_dir_all(&storage.mods_dir).unwrap();
+		std::fs::create_dir_all(&storage.resourcepacks_dir).unwrap();
+		std::fs::create_dir_all(&storage.shaderpacks_dir).unwrap();
+
+		let tracked = fixture_tracked_mod();
+		storage.save(ProjectType::Mod, "sodium", &tracked).unwrap();
+
+		// Cache contains the JAR bytes keyed by sha1, so the exporter has
+		// something to copy into the zip's mods/ directory.
+		let cache_dir = root.join("cache");
+		std::fs::create_dir_all(&cache_dir).unwrap();
+		let jar_bytes = b"PK\x03\x04 fake jar bytes for roundtrip test";
+		let sha1 = HashType::Sha1.compute_for_bytes(jar_bytes);
+		let jar_path = cache_dir.join(format!("sha1_{}.jar", sha1));
+		std::fs::write(&jar_path, jar_bytes).unwrap();
+
+		// Re-save the tracked mod with the cache-aligned hash so the exporter
+		// can find the JAR. Everything else from the fixture is preserved.
+		let mut tracked = tracked;
+		tracked.hash = Some(sha1.clone());
+		storage.save(ProjectType::Mod, "sodium", &tracked).unwrap();
+
+		let cache = JarCache::new(cache_dir);
+
+		let output_path = root.join("out.mrpack");
+		export_to_mrpack(&manifest, &storage, &cache, root, &output_path)
+			.expect("export should succeed");
+
+		// Read the produced zip and pull modrinth.index.json back out.
+		let file = std::fs::File::open(&output_path).unwrap();
+		let mut archive = zip::ZipArchive::new(file).unwrap();
+
+		let mut index_bytes = Vec::new();
+		archive
+			.by_name("modrinth.index.json")
+			.expect("zip must contain modrinth.index.json")
+			.read_to_end(&mut index_bytes)
+			.unwrap();
+		let reparsed: MrpackIndex = serde_json::from_slice(&index_bytes)
+			.expect("index must parse back into MrpackIndex");
+
+		assert_eq!(reparsed.name, "Golden Pack");
+		assert_eq!(reparsed.version_id, "1.0.0");
+		assert_eq!(
+			reparsed.dependencies.get("minecraft").map(String::as_str),
+			Some("1.20.4")
+		);
+		assert_eq!(
+			reparsed
+				.dependencies
+				.get("fabric-loader")
+				.map(String::as_str),
+			Some("0.16.5"),
+		);
+		assert_eq!(reparsed.files.len(), 1);
+
+		let file = &reparsed.files[0];
+		assert_eq!(file.path, "mods/sodium.jar");
+		assert_eq!(file.hashes.sha1.as_deref(), Some(sha1.as_str()));
+		assert_eq!(
+			file.downloads,
+			vec!["https://example.com/sodium.jar".to_string()],
+		);
+		let env = file.env.as_ref().expect("env must roundtrip");
+		assert_eq!(env.client, "required");
+		assert_eq!(env.server, "unsupported");
+
+		// And the importer's env-conversion function agrees on the inverse.
+		assert_eq!(mrpack_env_to_mod_env(env), ModEnv::Client);
+
+		// The mods/ directory should contain the JAR bytes we staged.
+		let mut jar_in_zip = Vec::new();
+		archive
+			.by_name("mods/sodium.jar")
+			.expect("zip must contain the staged JAR")
+			.read_to_end(&mut jar_in_zip)
+			.unwrap();
+		assert_eq!(jar_in_zip, jar_bytes);
+	}
+}

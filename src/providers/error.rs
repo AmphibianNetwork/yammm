@@ -13,7 +13,10 @@ use crate::api::error::ApiError;
 pub enum ProviderError {
 	/// The mod or version was not found on the source.
 	#[error("{provider} has no entry for {what}")]
-	NotFound { provider: &'static str, what: String },
+	NotFound {
+		provider: &'static str,
+		what: String,
+	},
 
 	/// The provider returned HTTP 429.
 	#[error("{provider} rate-limited: {message}")]
@@ -63,7 +66,10 @@ impl ProviderError {
 
 	/// Convert an `ApiError` into a `ProviderError`, tagging it with the
 	/// source name so error messages identify which provider failed.
-	pub fn from_api_error(err: ApiError, provider: &'static str) -> Self {
+	pub fn from_api_error(
+		err: ApiError,
+		provider: &'static str,
+	) -> Self {
 		match err {
 			ApiError::NotFound(what) => Self::NotFound { provider, what },
 			ApiError::Http {

@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use crate::api::minecraft::{Artifact, Library, OsRule};
 use crate::output;
-use crate::types::HashType;
 
 /// Downloads all MC libraries for a version, skipping OS-incompatible ones.
 /// Returns the classpath JAR paths and the natives directory path.
@@ -77,43 +76,31 @@ pub async fn download_mc_libraries(
 	Ok((classpath_paths, natives_dir))
 }
 
-/// Downloads a single library artifact, verifying its SHA-1 checksum.
+/// Downloads a single library artifact, verifying its SHA-1 checksum when
+/// the manifest provides one. Streams through a tmp file so memory stays
+/// bounded regardless of artifact size.
 async fn download_artifact(
 	client: &reqwest::Client,
 	artifact: &Artifact,
 	dest: &Path,
 ) -> Result<()> {
-	if dest.exists() {
-		return Ok(());
-	}
-
-	if let Some(parent) = dest.parent() {
-		std::fs::create_dir_all(parent)?;
-	}
-
-	let response = client.get(&artifact.url).send().await?;
-	if !response.status().is_success() {
-		return Err(crate::errors::YammmError::download_failed(format!(
-			"Failed to download library {}: HTTP {}",
-			artifact.path,
-			response.status()
-		))
-		.into());
-	}
-	let bytes = response.bytes().await?;
-
-	if let Some(ref sha1) = artifact.sha1 {
-		let computed = HashType::Sha1.compute_for_bytes(&bytes);
-		if computed != *sha1 {
-			return Err(crate::errors::YammmError::download_failed(format!(
-				"SHA-1 mismatch for {} (expected {}, got {})",
-				artifact.path, sha1, computed
-			))
-			.into());
-		}
-	}
-
-	std::fs::write(dest, &bytes)?;
+	let policy = crate::api::streaming::HashPolicy::from_optional(
+		artifact.sha1.as_deref().map(|hex| {
+			crate::api::streaming::ExpectedHash {
+				hash_type: crate::types::HashType::Sha1,
+				hex,
+			}
+		}),
+		"Minecraft library manifest artifact has no sha1",
+	);
+	crate::api::streaming::download_to_file(
+		client,
+		&artifact.url,
+		dest,
+		policy,
+		&artifact.path,
+	)
+	.await?;
 	Ok(())
 }
 
@@ -228,4 +215,123 @@ fn rule_matches_features(
 		}
 	}
 	true
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::api::minecraft::Rule;
+
+	fn lib_with_rules(rules: Vec<Rule>) -> Library {
+		Library {
+			name: "test:lib:1".to_string(),
+			downloads: None,
+			rules: Some(rules),
+		}
+	}
+
+	fn allow_for_os(name: &str) -> Rule {
+		Rule {
+			action: "allow".to_string(),
+			os: Some(OsRule {
+				name: Some(name.to_string()),
+				arch: None,
+			}),
+			features: None,
+		}
+	}
+
+	fn disallow_for_os(name: &str) -> Rule {
+		Rule {
+			action: "disallow".to_string(),
+			os: Some(OsRule {
+				name: Some(name.to_string()),
+				arch: None,
+			}),
+			features: None,
+		}
+	}
+
+	#[test]
+	fn test_library_without_rules_is_always_included() {
+		let lib = Library {
+			name: "no-rules".to_string(),
+			downloads: None,
+			rules: None,
+		};
+		assert!(should_include_library(&lib));
+	}
+
+	#[test]
+	fn test_library_with_allow_for_current_os_is_included() {
+		let lib =
+			lib_with_rules(vec![allow_for_os(crate::utils::current_os_name())]);
+		assert!(should_include_library(&lib));
+	}
+
+	#[test]
+	fn test_library_with_allow_for_other_os_is_excluded() {
+		// Pick a fictitious OS name so it never matches the current platform.
+		let lib = lib_with_rules(vec![allow_for_os("haiku-os")]);
+		assert!(
+			!should_include_library(&lib),
+			"libraries default to disallowed; an allow that doesn't match shouldn't flip it"
+		);
+	}
+
+	#[test]
+	fn test_library_allow_then_disallow_for_current_os() {
+		// Real-world pattern: allow-all (no os rule) followed by disallow-osx.
+		// On the current OS this should resolve to the latter rule's outcome.
+		let allow_all = Rule {
+			action: "allow".to_string(),
+			os: None,
+			features: None,
+		};
+		let lib = lib_with_rules(vec![
+			allow_all,
+			disallow_for_os(crate::utils::current_os_name()),
+		]);
+		assert!(
+			!should_include_library(&lib),
+			"later disallow for current OS must override earlier allow-all"
+		);
+	}
+
+	#[test]
+	fn test_rule_matches_features_with_true_feature_disqualifies() {
+		let mut features = std::collections::BTreeMap::new();
+		features
+			.insert("is_demo_user".to_string(), serde_json::Value::Bool(true));
+		assert!(
+			!rule_matches_features(&Some(features)),
+			"any feature flag set to true disqualifies the rule"
+		);
+	}
+
+	#[test]
+	fn test_rule_matches_features_with_no_features_or_all_false() {
+		assert!(rule_matches_features(&None));
+
+		let mut features = std::collections::BTreeMap::new();
+		features.insert(
+			"has_custom_resolution".to_string(),
+			serde_json::Value::Bool(false),
+		);
+		assert!(rule_matches_features(&Some(features)));
+	}
+
+	#[test]
+	fn test_native_classifier_candidates_includes_arch_specific_first() {
+		let candidates = native_classifier_candidates();
+		assert_eq!(candidates.len(), 2, "expected arch-specific + generic");
+		let os = crate::utils::current_os_name();
+		// The first should embed an arch suffix; the second should not.
+		assert!(
+			candidates[0].starts_with(&format!("natives-{}-", os)),
+			"first candidate should be arch-specific: {}",
+			candidates[0]
+		);
+		assert_eq!(candidates[1], format!("natives-{}", os));
+	}
 }

@@ -65,7 +65,7 @@ impl InitCommand {
 		tracing::debug!("InitCommand running");
 
 		let init_info = self
-			.collect_init_info(&ctx.http_client)
+			.collect_init_info(ctx.http_client())
 			.await
 			.context("Failed to collect modpack info")?;
 
@@ -85,18 +85,33 @@ impl InitCommand {
 			})?;
 		}
 
-		ensure_dir(&self.output_dir.join("mods"), "mods")?;
-		ensure_dir(&self.output_dir.join("config"), "config")?;
-		ensure_dir(&self.output_dir.join("resourcepacks"), "resourcepacks")?;
-		ensure_dir(&self.output_dir.join("shaderpacks"), "shaderpacks")?;
-		ensure_dir(
-			&self.output_dir.join("resources").join("client"),
-			"resources/client",
-		)?;
-		ensure_dir(
-			&self.output_dir.join("resources").join("server"),
-			"resources/server",
-		)?;
+		// Track what we actually created vs found already-present so the
+		// JSON payload can be precise about disk side-effects.
+		let mut created: Vec<String> = Vec::new();
+
+		let dirs = [
+			(self.output_dir.join("mods"), "mods"),
+			(self.output_dir.join("config"), "config"),
+			(self.output_dir.join("resourcepacks"), "resourcepacks"),
+			(self.output_dir.join("shaderpacks"), "shaderpacks"),
+			(
+				self.output_dir.join("resources").join("client"),
+				"resources/client",
+			),
+			(
+				self.output_dir.join("resources").join("server"),
+				"resources/server",
+			),
+		];
+		for (path, label) in &dirs {
+			if !path.exists() {
+				fs::create_dir_all(path).with_context(|| {
+					format!("Failed to create {} directory", label)
+				})?;
+				output::success(format!("Created {} directory", label));
+				created.push((*label).to_string());
+			}
+		}
 
 		let config = ModpackManifest {
 			name: init_info.name,
@@ -115,6 +130,7 @@ impl InitCommand {
 		};
 
 		let modpack_path = self.output_dir.join("modpack.toml");
+		let mut manifest_was_created = false;
 		if modpack_path.exists() {
 			output::warning("modpack.toml already exists, skipping");
 		} else {
@@ -122,6 +138,8 @@ impl InitCommand {
 				.save(&config)
 				.context("Failed to write modpack.toml")?;
 			output::success("Created modpack.toml");
+			created.push("modpack.toml".to_string());
+			manifest_was_created = true;
 		}
 
 		let gitignore_path = self.output_dir.join(".gitignore");
@@ -148,6 +166,7 @@ logs/
 			fs::write(&gitignore_path, gitignore_content)
 				.context("Failed to write .gitignore")?;
 			output::success("Created .gitignore");
+			created.push(".gitignore".to_string());
 		}
 
 		let readme_path = self.output_dir.join("README.md");
@@ -176,6 +195,24 @@ logs/
 			fs::write(&readme_path, content)
 				.context("Failed to write README.md")?;
 			output::success("Created README.md");
+			created.push("README.md".to_string());
+		}
+
+		if output::is_json_mode() {
+			output::emit_json(&serde_json::json!({
+				"command": "init",
+				"output_dir": self.output_dir.display().to_string(),
+				"name": config.name,
+				"version": config.version,
+				"minecraft_version": config.minecraft_version,
+				"loader": {
+					"name": config.loader.loader.map(|l| l.to_string()),
+					"version": config.loader.version,
+				},
+				"created": created,
+				"modpack_toml_created": manifest_was_created,
+			}))?;
+			return Ok(());
 		}
 
 		output::success("Modpack workspace initialized!");
@@ -357,8 +394,12 @@ logs/
 	/// - No name, version, or loader flags were provided (blank slate)
 	///
 	/// If the user provides *any* of those flags, we assume they want
-	/// non-interactive mode with defaults for the rest.
+	/// non-interactive mode with defaults for the rest. JSON mode always
+	/// disables prompts — scripts wouldn't be able to answer them.
 	fn should_interact(&self) -> bool {
+		if output::is_json_mode() {
+			return false;
+		}
 		self.interactive
 			|| (self.name.is_none()
 				&& self.minecraft_version.is_none()
@@ -450,18 +491,6 @@ async fn fetch_loader_version_for(
 			.await
 		}
 	}
-}
-
-fn ensure_dir(
-	path: &std::path::Path,
-	label: &str,
-) -> anyhow::Result<()> {
-	if !path.exists() {
-		fs::create_dir_all(path)
-			.with_context(|| format!("Failed to create {} directory", label))?;
-		output::success(format!("Created {} directory", label));
-	}
-	Ok(())
 }
 
 #[cfg(test)]

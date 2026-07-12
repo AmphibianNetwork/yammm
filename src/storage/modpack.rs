@@ -15,14 +15,17 @@ impl ManifestStore {
 		Self { path: path.into() }
 	}
 
+	#[allow(dead_code)] // convenience for callers that only know the root
 	pub fn from_root(root: &Path) -> Self {
 		Self::new(root.join("modpack.toml"))
 	}
 
+	#[allow(dead_code)]
 	pub fn path(&self) -> &Path {
 		&self.path
 	}
 
+	#[allow(dead_code)]
 	pub fn exists(&self) -> bool {
 		self.path.exists()
 	}
@@ -32,7 +35,10 @@ impl ManifestStore {
 			std::fs::read_to_string(&self.path).with_context(|| {
 				format!("Cannot read config: {}", self.path.display())
 			})?;
-		toml::from_str(&contents).context("Failed to parse config")
+		let manifest: ModpackManifest =
+			toml::from_str(&contents).context("Failed to parse config")?;
+		manifest.validate()?;
+		Ok(manifest)
 	}
 
 	pub fn save(

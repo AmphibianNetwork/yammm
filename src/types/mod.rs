@@ -10,12 +10,10 @@ mod mod_info;
 mod version;
 
 pub use filters::VersionFilters;
-pub use hash_type::{HashType, HashTypeParseError};
+pub use hash_type::HashType;
 pub use loader::{LoaderError, LoaderType};
 pub use mod_info::{
-	Dependency, DependencyKind, DependencyKindError, ModEnv, ModEnvParseError,
-	ModIdentity, ModInfo, ModSource, ModSourceParseError, ModVersion,
-	ProjectType, ProjectTypeParseError, SourceDependency, TrackedMod,
-	TrackedModBuilder,
+	Dependency, DependencyKind, ModEnv, ModIdentity, ModInfo, ModSource,
+	ModVersion, ProjectType, SourceDependency, TrackedMod,
 };
-pub use version::{ComparableVersion, Version, VersionError, VersionReq};
+pub use version::{Version, VersionReq};

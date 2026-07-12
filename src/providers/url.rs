@@ -13,13 +13,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::api::GitHubClient;
+use crate::providers::error::{ProviderError, ProviderResult};
 use crate::providers::provider::{ModSourceProvider, SearchFilters};
 use crate::types::{
 	HashType, ModEnv, ModInfo, ModSource, ModVersion, SourceDependency,
 	VersionFilters,
 };
 use crate::utils::{slugify, system_time_to_date, today_iso8601};
-use anyhow::Result;
+
+const SOURCE: &str = "url";
 
 /// Classifies a URL identifier into its handling strategy.
 ///
@@ -80,14 +82,14 @@ impl ModSourceProvider for UrlSource {
 		&self,
 		_query: &str,
 		_filters: &SearchFilters,
-	) -> Result<Vec<ModInfo>> {
+	) -> ProviderResult<Vec<ModInfo>> {
 		Ok(Vec::new())
 	}
 
 	async fn get_mod(
 		&self,
 		mod_id: &str,
-	) -> Result<ModInfo> {
+	) -> ProviderResult<ModInfo> {
 		match classify_url(mod_id) {
 			UrlKind::GitHub { owner, repo } => {
 				self.get_mod_github(owner, repo, mod_id).await
@@ -101,7 +103,7 @@ impl ModSourceProvider for UrlSource {
 		&self,
 		mod_id: &str,
 		_filters: &VersionFilters,
-	) -> Result<Vec<ModVersion>> {
+	) -> ProviderResult<Vec<ModVersion>> {
 		match classify_url(mod_id) {
 			UrlKind::GitHub { owner, repo } => {
 				self.get_versions_github(owner, repo).await
@@ -115,7 +117,7 @@ impl ModSourceProvider for UrlSource {
 		&self,
 		_mod_id: &str,
 		_version_id: &str,
-	) -> Result<Vec<SourceDependency>> {
+	) -> ProviderResult<Vec<SourceDependency>> {
 		Ok(vec![])
 	}
 }
@@ -126,27 +128,21 @@ impl UrlSource {
 		owner: &str,
 		repo: &str,
 		mod_id: &str,
-	) -> Result<ModInfo> {
+	) -> ProviderResult<ModInfo> {
 		let releases =
 			self.github_client.get_releases(owner, repo).await.map_err(
-				|e| {
-					crate::errors::YammmError::mod_not_found(format!(
-						"GitHub repository not found: {}",
-						e
-					))
+				|e| ProviderError::NotFound {
+					provider: SOURCE,
+					what: format!("GitHub repo {}/{}: {}", owner, repo, e),
 				},
 			)?;
 
-		let latest = match releases.into_iter().next() {
-			Some(r) => r,
-			None => {
-				return Err(crate::errors::YammmError::mod_not_found(format!(
-					"No releases found for {}",
-					mod_id
-				))
-				.into());
+		let latest = releases.into_iter().next().ok_or_else(|| {
+			ProviderError::NotFound {
+				provider: SOURCE,
+				what: format!("no releases for {}", mod_id),
 			}
-		};
+		})?;
 
 		Ok(GitHubClient::to_mod_info(
 			latest,
@@ -157,7 +153,7 @@ impl UrlSource {
 	fn get_mod_file(
 		&self,
 		mod_id: &str,
-	) -> Result<ModInfo> {
+	) -> ProviderResult<ModInfo> {
 		let path_str = file_path_from_url(mod_id).unwrap_or(mod_id);
 		let path = Path::new(path_str);
 		let stem = path
@@ -171,7 +167,7 @@ impl UrlSource {
 	fn get_mod_url(
 		&self,
 		mod_id: &str,
-	) -> Result<ModInfo> {
+	) -> ProviderResult<ModInfo> {
 		let filename = extract_filename(mod_id);
 		let name = strip_extension(filename);
 
@@ -182,15 +178,13 @@ impl UrlSource {
 		&self,
 		owner: &str,
 		repo: &str,
-	) -> Result<Vec<ModVersion>> {
+	) -> ProviderResult<Vec<ModVersion>> {
 		let owner_repo = format!("{}/{}", owner, repo);
 		let releases =
 			self.github_client.get_releases(owner, repo).await.map_err(
-				|e| {
-					crate::errors::YammmError::mod_not_found(format!(
-						"GitHub repository not found: {}",
-						e
-					))
+				|e| ProviderError::NotFound {
+					provider: SOURCE,
+					what: format!("GitHub repo {}: {}", owner_repo, e),
 				},
 			)?;
 
@@ -203,7 +197,7 @@ impl UrlSource {
 	fn get_versions_file(
 		&self,
 		mod_id: &str,
-	) -> Result<Vec<ModVersion>> {
+	) -> ProviderResult<Vec<ModVersion>> {
 		let path_str = file_path_from_url(mod_id).unwrap_or(mod_id);
 		let path = Path::new(path_str);
 		let metadata = std::fs::metadata(path).ok();
@@ -234,7 +228,7 @@ impl UrlSource {
 	async fn get_versions_url(
 		&self,
 		mod_id: &str,
-	) -> Result<Vec<ModVersion>> {
+	) -> ProviderResult<Vec<ModVersion>> {
 		let file_size = match self.http_client.head(mod_id).send().await {
 			Ok(response) if response.status().is_success() => response
 				.headers()

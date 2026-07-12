@@ -1,6 +1,7 @@
 //! Modpack configuration (modpack.toml).
 //! Individual mods are stored in `.ron` files under the mods/ directory.
 
+use crate::errors::YammmError;
 use crate::types::{LoaderType, VersionFilters};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -91,6 +92,45 @@ impl ModpackManifest {
 	/// Checks if the modpack has a non-empty minecraft_version.
 	pub fn is_initialized(&self) -> bool {
 		!self.minecraft_version.is_empty()
+	}
+
+	/// True when *no* identifying field is set — the default-empty manifest
+	/// produced by `new()`. Importers and `init` deliberately round-trip this
+	/// state through disk, so validation has to let it pass.
+	fn is_fully_empty(&self) -> bool {
+		self.name.is_empty()
+			&& self.description.is_empty()
+			&& self.version.is_empty()
+			&& self.minecraft_version.is_empty()
+			&& self.loader.loader.is_none()
+			&& self.loader.version.is_empty()
+			&& self.mod_path.is_none()
+			&& self.resource_pack_path.is_none()
+			&& self.shader_pack_path.is_none()
+	}
+
+	/// Reject manifests that look hand-broken: identifying fields present but
+	/// `minecraft_version` missing, or `loader.version` set without a loader
+	/// type. Fully-empty manifests (fresh from `init` before prompts run, or
+	/// freshly-imported MRPACKs awaiting their `depends` map) pass through.
+	pub fn validate(&self) -> Result<(), YammmError> {
+		if self.is_fully_empty() {
+			return Ok(());
+		}
+		if self.minecraft_version.is_empty() {
+			return Err(YammmError::config_error(
+				"modpack.toml: minecraft_version is required when other \
+				 fields are set",
+			));
+		}
+		if !self.loader.version.is_empty() && self.loader.loader.is_none() {
+			return Err(YammmError::config_error(
+				"modpack.toml: loader.version is set but loader type is \
+				 missing — add a `loader.loader` field (fabric, forge, quilt, \
+				 or neoforge)",
+			));
+		}
+		Ok(())
 	}
 
 	/// Extract version filters. Empty strings/None become None.
@@ -302,6 +342,48 @@ mod tests {
 			config.resourcepacks_dir(base),
 			std::path::PathBuf::from("/tmp/modpack/resourcepacks")
 		);
+	}
+
+	#[test]
+	fn test_validate_empty_manifest_passes() {
+		let manifest = ModpackManifest::new();
+		assert!(manifest.validate().is_ok());
+	}
+
+	#[test]
+	fn test_validate_fully_populated_manifest_passes() {
+		let mut manifest = ModpackManifest::new();
+		manifest.name = "Test".to_string();
+		manifest.minecraft_version = "1.20.4".to_string();
+		manifest.loader.loader = Some(LoaderType::Fabric);
+		manifest.loader.version = "0.16.5".to_string();
+		assert!(manifest.validate().is_ok());
+	}
+
+	#[test]
+	fn test_validate_partial_manifest_rejects_missing_minecraft_version() {
+		let mut manifest = ModpackManifest::new();
+		manifest.name = "Test".to_string();
+		let err = manifest.validate().unwrap_err();
+		assert!(err.to_string().contains("minecraft_version"));
+	}
+
+	#[test]
+	fn test_validate_loader_version_without_loader_type_rejected() {
+		let mut manifest = ModpackManifest::new();
+		manifest.minecraft_version = "1.20.4".to_string();
+		manifest.loader.version = "0.16.5".to_string();
+		let err = manifest.validate().unwrap_err();
+		assert!(err.to_string().contains("loader type"));
+	}
+
+	#[test]
+	fn test_validate_loader_type_without_version_passes() {
+		// `loader.version = ""` means "use latest stable" — legitimate.
+		let mut manifest = ModpackManifest::new();
+		manifest.minecraft_version = "1.20.4".to_string();
+		manifest.loader.loader = Some(LoaderType::Fabric);
+		assert!(manifest.validate().is_ok());
 	}
 
 	#[test]

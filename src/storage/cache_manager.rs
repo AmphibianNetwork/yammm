@@ -17,6 +17,7 @@ use super::cache::JarCache;
 /// Statistics for a single cache subdirectory.
 #[derive(Debug, Clone)]
 pub struct DirStats {
+	#[allow(dead_code)] // populated for display, not currently shown
 	pub path: PathBuf,
 	pub file_count: usize,
 	pub total_size: u64,
@@ -68,6 +69,7 @@ impl CacheManager {
 		&self.cache_root
 	}
 
+	#[allow(dead_code)] // exposes the inner cache for callers outside `cache` operations
 	pub fn jar_cache(&self) -> &JarCache {
 		&self.jar_cache
 	}

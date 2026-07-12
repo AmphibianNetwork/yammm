@@ -1,7 +1,19 @@
 //! Terminal output formatting layer.
 //!
-//! Styled print helpers, progress bars, spinners, and table construction.
-//! All styling can be globally disabled via `set_colors_enabled(false)`.
+//! Every public helper (`success`, `info`, `heading`, …) constructs an
+//! [`OutputEvent`] and routes it through [`dispatch`]. `dispatch` is the
+//! one place that decides whether to:
+//!
+//! - **render to stdout / stderr** (default mode)
+//! - **append to a thread-local capture buffer** (TUI inline mode)
+//! - **silence the stdout helpers** (`--quiet`)
+//! - **silence all non-JSON output** (`--json`, leaving stdout for the
+//!   one JSON document the command emits)
+//!
+//! The split between the typed enum and the rendering functions
+//! (`render_styled`, `render_plain`) keeps coloring out of the gating
+//! decision: a single match handles routing; styling sits on the
+//! side, used only when the destination is a TTY.
 
 use console::Style;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -16,6 +28,8 @@ use comfy_table::{
 };
 
 static OUTPUT_CAPTURED: AtomicBool = AtomicBool::new(false);
+static OUTPUT_QUIET: AtomicBool = AtomicBool::new(false);
+static OUTPUT_JSON: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
 	static CAPTURED_LINES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -39,6 +53,163 @@ fn capture_line(line: String) {
 	CAPTURED_LINES.with(|lines| lines.borrow_mut().push(line));
 }
 
+/// Globally enable or disable quiet mode. When quiet, every stdout helper
+/// (success, info, heading, bullet, raw_line, etc.) and the progress-bar /
+/// spinner factories become no-ops. Stderr helpers (error, warning) are
+/// unaffected — diagnostic output must remain visible regardless.
+pub fn set_quiet(enabled: bool) {
+	OUTPUT_QUIET.store(enabled, Ordering::Relaxed);
+}
+
+pub fn is_quiet() -> bool {
+	OUTPUT_QUIET.load(Ordering::Relaxed)
+}
+
+/// Enable or disable JSON output mode.
+///
+/// In JSON mode every stdout status helper (success, info, heading,
+/// bullet, blank_line, progress bars, raw_block) becomes a no-op so the
+/// command's *result* — a single JSON document emitted via
+/// [`emit_json`] — is the only thing on stdout. Stderr helpers (error,
+/// warning) keep emitting so failures stay visible.
+///
+/// Commands that haven't been wired for JSON should detect this flag
+/// via [`is_json_mode`] and return an explicit error rather than
+/// silently emit nothing. See [`require_json_support`] for the canned
+/// error.
+pub fn set_json_mode(enabled: bool) {
+	OUTPUT_JSON.store(enabled, Ordering::Relaxed);
+}
+
+pub fn is_json_mode() -> bool {
+	OUTPUT_JSON.load(Ordering::Relaxed)
+}
+
+/// Helper for command handlers: if the user passed `--json` and the
+/// command doesn't yet have a JSON output path, return a clear error
+/// instead of producing no output.
+pub fn require_json_support(command: &str) -> anyhow::Result<()> {
+	if is_json_mode() {
+		Err(crate::errors::YammmError::invalid_args(format!(
+			"command '{command}' does not yet support --json output. \
+			 Run without --json, or open an issue requesting JSON for this command."
+		))
+		.into())
+	} else {
+		Ok(())
+	}
+}
+
+/// Status messages on stdout — silenced by `--quiet` and `--json`.
+#[derive(Debug, Clone, Copy)]
+pub enum StatusKind {
+	Heading,
+	Info,
+	Success,
+	Bullet,
+	Dim,
+}
+
+/// Diagnostics on stderr — never silenced; visible even in `--quiet`
+/// and `--json` modes.
+#[derive(Debug, Clone, Copy)]
+pub enum DiagnosticKind {
+	Warning,
+	Error,
+}
+
+/// Typed representation of every line the program might emit.
+///
+/// Every public helper in this module produces one of these and routes
+/// it through [`dispatch`], which is the single place that decides
+/// whether the event should render to the terminal, be captured, or be
+/// silenced.
+#[derive(Debug, Clone)]
+pub enum OutputEvent {
+	/// Pre-formatted status text. The styled rendering applies colour
+	/// and any symbol prefix (`✓`, `  •`, etc.) via [`render_styled`].
+	Status(StatusKind, String),
+	/// Pre-formatted diagnostic text destined for stderr.
+	Diagnostic(DiagnosticKind, String),
+	/// An empty line. Treated like a status event for gating.
+	BlankLine,
+	/// Raw, unstyled stdout content representing the *result* of a
+	/// command (a rendered table, search hits, etc.). Survives `--quiet`
+	/// but is suppressed in `--json` (where the only legitimate stdout
+	/// artifact is the JSON document).
+	Raw(String),
+	/// Same as [`Raw`] but the payload contains newlines. Capture splits
+	/// it line-by-line so the buffer stays line-oriented.
+	///
+	/// [`Raw`]: OutputEvent::Raw
+	RawBlock(String),
+	/// A JSON document. Only emitted when `is_json_mode()` is true (or
+	/// during capture). The string is the already-serialised pretty
+	/// JSON; [`dispatch`] does not re-encode.
+	JsonDocument(String),
+}
+
+/// Central routing for every output event. The only stdout/stderr
+/// writes in this module happen here.
+fn dispatch(event: OutputEvent) {
+	if is_captured() {
+		capture_event(&event);
+		return;
+	}
+
+	match event {
+		OutputEvent::Diagnostic(kind, msg) => {
+			eprintln!("{}", render_diagnostic_styled(kind, &msg));
+		}
+		OutputEvent::JsonDocument(s) => {
+			// Constructed only via emit_json, which already gates on
+			// JSON mode. Emit unconditionally so non-JSON callers
+			// that bypass that guard still see their output.
+			println!("{}", s);
+		}
+		OutputEvent::Raw(s) => {
+			if !is_json_mode() {
+				println!("{}", s);
+			}
+		}
+		OutputEvent::RawBlock(s) => {
+			if !is_json_mode() {
+				println!("{}", s);
+			}
+		}
+		OutputEvent::BlankLine => {
+			if !is_quiet() && !is_json_mode() {
+				println!();
+			}
+		}
+		OutputEvent::Status(kind, msg) => {
+			if !is_quiet() && !is_json_mode() {
+				println!("{}", render_status_styled(kind, &msg));
+			}
+		}
+	}
+}
+
+/// Capture path: store the unstyled form so test harnesses and the TUI
+/// see the same bytes a non-coloured terminal would.
+fn capture_event(event: &OutputEvent) {
+	match event {
+		OutputEvent::Status(kind, msg) => {
+			capture_line(render_status_plain(*kind, msg));
+		}
+		OutputEvent::Diagnostic(kind, msg) => {
+			capture_line(render_diagnostic_plain(*kind, msg));
+		}
+		OutputEvent::BlankLine => capture_line(String::new()),
+		OutputEvent::Raw(s) => capture_line(s.clone()),
+		OutputEvent::RawBlock(s) | OutputEvent::JsonDocument(s) => {
+			for line in s.lines() {
+				capture_line(line.to_string());
+			}
+		}
+	}
+}
+
 static SUCCESS_CHECK: LazyLock<console::StyledObject<&str>> =
 	LazyLock::new(|| Style::new().green().bold().apply_to("✓"));
 static ERROR_CROSS: LazyLock<console::StyledObject<&str>> =
@@ -47,113 +218,133 @@ static WARN_SYMBOL: LazyLock<console::StyledObject<&str>> =
 	LazyLock::new(|| Style::new().yellow().bold().apply_to("⚠"));
 static BULLET_POINT: LazyLock<console::StyledObject<&str>> =
 	LazyLock::new(|| Style::new().dim().apply_to("  •"));
-static ITEM_CHECK: LazyLock<console::StyledObject<&str>> =
-	LazyLock::new(|| Style::new().green().apply_to("✓"));
-static ITEM_CROSS: LazyLock<console::StyledObject<&str>> =
-	LazyLock::new(|| Style::new().red().apply_to("✗"));
-
 static HEADING_STYLE: LazyLock<Style> =
 	LazyLock::new(|| Style::new().bold().cyan());
 static INFO_STYLE: LazyLock<Style> = LazyLock::new(|| Style::new().cyan());
 static DIM_STYLE: LazyLock<Style> = LazyLock::new(|| Style::new().dim());
-static BOLD_STYLE: LazyLock<Style> = LazyLock::new(|| Style::new().bold());
 
-/// Emit a styled line to stdout, or capture it if output capture is active.
-macro_rules! emit {
-	(stdout $line:expr, $styled:expr) => {
-		if is_captured() {
-			capture_line($line);
-			return;
+fn render_status_styled(
+	kind: StatusKind,
+	msg: &str,
+) -> String {
+	match kind {
+		StatusKind::Success => format!("{} {}", *SUCCESS_CHECK, msg),
+		StatusKind::Bullet => format!("{} {}", *BULLET_POINT, msg),
+		StatusKind::Heading => format!("{}", HEADING_STYLE.apply_to(msg)),
+		StatusKind::Info => format!("{}", INFO_STYLE.apply_to(msg)),
+		StatusKind::Dim => format!("{}", DIM_STYLE.apply_to(msg)),
+	}
+}
+
+fn render_status_plain(
+	kind: StatusKind,
+	msg: &str,
+) -> String {
+	match kind {
+		StatusKind::Success => format!("✓ {}", msg),
+		StatusKind::Bullet => format!("  • {}", msg),
+		StatusKind::Heading | StatusKind::Info | StatusKind::Dim => {
+			msg.to_string()
 		}
-		println!("{}", $styled);
-	};
-	(stderr $line:expr, $styled:expr) => {
-		if is_captured() {
-			capture_line($line);
-			return;
-		}
-		eprintln!("{}", $styled);
-	};
+	}
+}
+
+fn render_diagnostic_styled(
+	kind: DiagnosticKind,
+	msg: &str,
+) -> String {
+	match kind {
+		DiagnosticKind::Error => format!("{} {}", *ERROR_CROSS, msg),
+		DiagnosticKind::Warning => format!("{} {}", *WARN_SYMBOL, msg),
+	}
+}
+
+fn render_diagnostic_plain(
+	kind: DiagnosticKind,
+	msg: &str,
+) -> String {
+	match kind {
+		DiagnosticKind::Error => format!("✗ {}", msg),
+		DiagnosticKind::Warning => format!("⚠ {}", msg),
+	}
+}
+
+/// Emit a single JSON document on stdout (no trailing decoration).
+///
+/// Use this from command handlers to report their result when
+/// [`is_json_mode`] is on. Errors during serialization are propagated so
+/// the caller can choose to fall back to text output.
+pub fn emit_json<T: serde::Serialize + ?Sized>(
+	value: &T
+) -> anyhow::Result<()> {
+	let s = serde_json::to_string_pretty(value).map_err(|e| {
+		anyhow::anyhow!("failed to serialize JSON output: {}", e)
+	})?;
+	dispatch(OutputEvent::JsonDocument(s));
+	Ok(())
 }
 
 pub fn success(msg: impl std::fmt::Display) {
-	let line = format!("{} {}", *SUCCESS_CHECK, msg);
-	emit!(stdout line, line);
+	dispatch(OutputEvent::Status(StatusKind::Success, msg.to_string()));
 }
 
 pub fn error(msg: impl std::fmt::Display) {
-	let line = format!("{} {}", *ERROR_CROSS, msg);
-	emit!(stderr line, line);
+	dispatch(OutputEvent::Diagnostic(
+		DiagnosticKind::Error,
+		msg.to_string(),
+	));
 }
 
 pub fn warning(msg: impl std::fmt::Display) {
-	let line = format!("{} {}", *WARN_SYMBOL, msg);
-	emit!(stderr line, line);
+	dispatch(OutputEvent::Diagnostic(
+		DiagnosticKind::Warning,
+		msg.to_string(),
+	));
 }
 
 pub fn heading(msg: impl std::fmt::Display) {
-	let line = format!("{}", msg);
-	emit!(stdout line, HEADING_STYLE.apply_to(msg));
+	dispatch(OutputEvent::Status(StatusKind::Heading, msg.to_string()));
 }
 
 pub fn info(msg: impl std::fmt::Display) {
-	let line = format!("{}", msg);
-	emit!(stdout line, INFO_STYLE.apply_to(msg));
+	dispatch(OutputEvent::Status(StatusKind::Info, msg.to_string()));
 }
 
 pub fn dim(msg: impl std::fmt::Display) {
-	let line = format!("{}", msg);
-	emit!(stdout line, DIM_STYLE.apply_to(msg));
+	dispatch(OutputEvent::Status(StatusKind::Dim, msg.to_string()));
 }
 
 /// Prints an empty line.
 pub fn blank_line() {
-	if is_captured() {
-		capture_line(String::new());
-		return;
-	}
-	println!();
+	dispatch(OutputEvent::BlankLine);
 }
 
-pub fn styled(
-	msg: impl std::fmt::Display,
-	style: Style,
-) {
-	let line = format!("{}", msg);
-	emit!(stdout line, style.apply_to(msg));
+/// Print one line of raw, unstyled data to stdout — for command output that
+/// is the *result* of a command (tables, config values, search hits), not a
+/// status message. Respects the capture machinery so the TUI can intercept
+/// downloads/spinners triggered by these commands.
+///
+/// Note: `raw_line` represents the *result* of a command and is therefore
+/// **not** silenced by quiet mode. Callers that want quiet to hide their
+/// output should use [`info`]/[`bullet`]/[`success`] instead.
+///
+/// In JSON mode `raw_line` *is* silenced — the JSON document is the only
+/// legitimate stdout artifact, and unstructured tables would corrupt it.
+pub fn raw_line(msg: impl std::fmt::Display) {
+	dispatch(OutputEvent::Raw(msg.to_string()));
+}
+
+/// Print pre-formatted multi-line output (e.g. a comfy_table render) to
+/// stdout, splitting on newlines so capture stays line-oriented.
+///
+/// Like [`raw_line`], this carries command results and is not silenced by
+/// quiet mode but *is* silenced by JSON mode.
+pub fn raw_block(msg: impl std::fmt::Display) {
+	dispatch(OutputEvent::RawBlock(msg.to_string()));
 }
 
 pub fn bullet(msg: impl std::fmt::Display) {
-	let line = format!("{} {}", *BULLET_POINT, msg);
-	emit!(stdout line, line);
-}
-
-fn print_item(
-	icon: &console::StyledObject<&str>,
-	name: &str,
-	version: &str,
-	source: &str,
-) {
-	let line = format!("  {} {} v{} [{}]", icon, name, version, source);
-	let ver = DIM_STYLE.apply_to(format!("v{}", version));
-	let src = Style::new().blue().apply_to(format!("[{}]", source));
-	emit!(stdout line, format!("  {} {} {} {}", icon, BOLD_STYLE.apply_to(name), ver, src));
-}
-
-pub fn item_success(
-	name: &str,
-	version: &str,
-	source: &str,
-) {
-	print_item(&ITEM_CHECK, name, version, source);
-}
-
-pub fn item_missing(
-	name: &str,
-	version: &str,
-	source: &str,
-) {
-	print_item(&ITEM_CROSS, name, version, source);
+	dispatch(OutputEvent::Status(StatusKind::Bullet, msg.to_string()));
 }
 
 /// Returns a colour-styled source label based on the provider name.
@@ -187,12 +378,17 @@ pub fn download_progress(total: u64) -> ProgressBar {
 		pb.finish_and_clear();
 		return pb;
 	}
+	if is_quiet() || is_json_mode() {
+		let pb = ProgressBar::hidden();
+		pb.finish_and_clear();
+		return pb;
+	}
 	let pb = ProgressBar::new(total);
 	pb.set_style(
 		ProgressStyle::with_template(
 			"{spinner:.green} {msg} [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
 		)
-		.unwrap()
+		.expect("hardcoded download progress template is valid")
 		.progress_chars("━╸─"),
 	);
 	pb
@@ -206,10 +402,15 @@ pub fn spinner(msg: &str) -> ProgressBar {
 		pb.finish_and_clear();
 		return pb;
 	}
+	if is_quiet() || is_json_mode() {
+		let pb = ProgressBar::hidden();
+		pb.finish_and_clear();
+		return pb;
+	}
 	let pb = ProgressBar::new_spinner();
 	pb.set_style(
 		ProgressStyle::with_template("{spinner:.green} {msg}")
-			.unwrap()
+			.expect("hardcoded spinner template is valid")
 			.tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
 	);
 	pb.set_message(msg.to_string());
@@ -300,6 +501,17 @@ pub fn present_download_summary(summary: &DownloadSummary) {
 mod tests {
 	use super::*;
 
+	/// Tests that exercise the process-global capture / quiet / json
+	/// flags must hold this lock — `cargo test` runs lib tests in
+	/// parallel by default and the atomics aren't isolated per test.
+	fn output_state_lock() -> std::sync::MutexGuard<'static, ()> {
+		use std::sync::Mutex;
+		static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+		M.get_or_init(|| Mutex::new(()))
+			.lock()
+			.unwrap_or_else(|e| e.into_inner())
+	}
+
 	#[test]
 	fn test_source_label() {
 		assert_eq!(source_label(&ModSource::modrinth("x")), "Modrinth");
@@ -347,5 +559,82 @@ mod tests {
 	fn test_set_colors_enabled() {
 		set_colors_enabled(false);
 		set_colors_enabled(true);
+	}
+
+	#[test]
+	fn quiet_mode_toggle_is_observable() {
+		let _lock = output_state_lock();
+		// The flag is a process-wide global, so other tests may have touched
+		// it. Snapshot, mutate, assert, restore — and don't rely on the
+		// initial state.
+		let prev = is_quiet();
+		set_quiet(true);
+		assert!(is_quiet());
+		set_quiet(false);
+		assert!(!is_quiet());
+		set_quiet(prev);
+	}
+
+	#[test]
+	fn captured_lines_ignore_quiet_for_visibility() {
+		let _lock = output_state_lock();
+		// Capture wins over quiet — the capture buffer must still see the
+		// line so the TUI / test harness can inspect what would have been
+		// printed. Drive both helpers through the macro path.
+		let prev = is_quiet();
+		set_quiet(true);
+		start_capture();
+		success("captured message");
+		bullet("captured bullet");
+		let lines = stop_capture();
+		set_quiet(prev);
+
+		assert!(
+			lines.iter().any(|l| l.contains("captured message")),
+			"capture should record success lines even in quiet mode: {lines:?}"
+		);
+		assert!(
+			lines.iter().any(|l| l.contains("captured bullet")),
+			"capture should record bullet lines even in quiet mode: {lines:?}"
+		);
+	}
+
+	#[test]
+	fn capture_records_plain_rendering_for_all_status_kinds() {
+		let _lock = output_state_lock();
+		start_capture();
+		heading("H");
+		info("I");
+		dim("D");
+		success("S");
+		bullet("B");
+		blank_line();
+		raw_line("R");
+		warning("W");
+		error("E");
+		let lines = stop_capture();
+
+		// Capture stores unstyled text — no ANSI escapes — so the
+		// substrings here would survive any colour setting.
+		assert!(lines.iter().any(|l| l == "H"));
+		assert!(lines.iter().any(|l| l == "I"));
+		assert!(lines.iter().any(|l| l == "D"));
+		assert!(lines.iter().any(|l| l == "✓ S"));
+		assert!(lines.iter().any(|l| l == "  • B"));
+		assert!(lines.iter().any(|l| l.is_empty()));
+		assert!(lines.iter().any(|l| l == "R"));
+		assert!(lines.iter().any(|l| l == "⚠ W"));
+		assert!(lines.iter().any(|l| l == "✗ E"));
+	}
+
+	#[test]
+	fn emit_json_routes_through_dispatch() {
+		let _lock = output_state_lock();
+		start_capture();
+		emit_json(&serde_json::json!({ "k": "v" })).unwrap();
+		let lines = stop_capture();
+		let joined = lines.join("\n");
+		assert!(joined.contains("\"k\""));
+		assert!(joined.contains("\"v\""));
 	}
 }

@@ -12,6 +12,8 @@
 //! - Required deps are auto-confirmed with `--yes`
 //! - Optional deps are skipped with `--yes` unless explicitly asked
 
+use std::collections::HashSet;
+
 use clap::Parser;
 
 use super::CliSource;
@@ -88,6 +90,13 @@ impl AddCommand {
 
 		let storage = &app.storage;
 
+		// Snapshot installed slugs for every project type so we can
+		// report what got newly added (the main mod plus any
+		// transitively installed deps) once the command finishes. This
+		// is used by --json output; it's cheap, so we always do it.
+		let before: HashSet<(ProjectType, String)> =
+			snapshot_installed(storage);
+
 		let resolved_source = self.source.to_mod_source(&self.identifier);
 
 		let add_ctx = AddContext {
@@ -97,7 +106,7 @@ impl AddCommand {
 			storage,
 			mc_version: minecraft_version,
 			loader,
-			registry: ctx.registry.clone(),
+			registry: ctx.registry().clone(),
 			env_override: self.env,
 			project_type_override: self.project_type.as_ref(),
 			categories: self.categories.clone(),
@@ -120,6 +129,32 @@ impl AddCommand {
 			&resolved_source,
 		)
 		.await?;
+
+		if output::is_json_mode() {
+			let after = snapshot_installed(storage);
+			let deps: Vec<_> = after
+				.difference(&before)
+				.filter(|(pt, slug)| {
+					!(*pt == main_project_type && slug == &main_slug)
+				})
+				.map(|(pt, slug)| {
+					serde_json::json!({
+						"id": slug,
+						"project_type": pt.as_str(),
+					})
+				})
+				.collect();
+			output::emit_json(&serde_json::json!({
+				"command": "add",
+				"added": {
+					"id": main_slug,
+					"project_type": main_project_type.as_str(),
+					"source": resolved_source.as_str(),
+				},
+				"dependencies_installed": deps,
+			}))?;
+			return Ok(());
+		}
 
 		output::success("Done");
 
@@ -175,12 +210,16 @@ impl AddCommand {
 			&categorized.incompatible_warnings,
 		);
 
+		// JSON mode is non-interactive — treat it as if --yes were passed
+		// so the dep installer doesn't try to prompt on a piped stdin.
+		let yes = self.yes || output::is_json_mode();
+
 		if !categorized.missing_required.is_empty() {
 			prompt_and_install_deps(
 				"Required dependencies",
 				&categorized.missing_required,
 				true,
-				self.yes,
+				yes,
 				self.force,
 				ctx,
 			)
@@ -192,7 +231,7 @@ impl AddCommand {
 				"Optional dependencies",
 				&categorized.missing_optional,
 				false,
-				self.yes,
+				yes,
 				self.force,
 				ctx,
 			)
@@ -208,4 +247,19 @@ impl AddCommand {
 
 		Ok(())
 	}
+}
+
+/// Snapshot every installed slug grouped by project type. Used by the
+/// command's JSON output path to compute a precise "what got added"
+/// diff after dependency resolution runs.
+fn snapshot_installed(
+	storage: &crate::storage::Storage
+) -> HashSet<(ProjectType, String)> {
+	let mut snapshot = HashSet::new();
+	for pt in ProjectType::VARIANTS {
+		for item in storage.list(*pt).unwrap_or_default() {
+			snapshot.insert((*pt, item.id));
+		}
+	}
+	snapshot
 }

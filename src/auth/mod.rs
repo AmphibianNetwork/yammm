@@ -176,8 +176,24 @@ pub async fn get_valid_token(
 			save_token(&new_token)?;
 			Ok(new_token)
 		}
-		// If refresh fails (e.g. revoked consent), fall back to full login
-		Err(_) => login(http_client).await,
+		// If refresh fails (e.g. revoked consent), fall back to full login —
+		// but only when stdin is a TTY. In a headless context (CI, scripts)
+		// the device-code prompt would silently hang, so surface the error
+		// instead and let the caller decide.
+		Err(e) => {
+			tracing::warn!(
+				"Microsoft token refresh failed: {}. Re-authentication required.",
+				e
+			);
+			if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+				login(http_client).await
+			} else {
+				Err(e).context(
+					"Microsoft refresh token rejected and stdin is not a TTY; \
+					 re-run `yammm auth login` interactively to refresh credentials",
+				)
+			}
+		}
 	}
 }
 

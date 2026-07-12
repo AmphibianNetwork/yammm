@@ -2,7 +2,95 @@
 //! and secure file writing (restricted permissions on Unix).
 
 use anyhow::{Context, Result};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Open options for the temp file used by `atomic_write_bytes`.
+///
+/// On Unix the caller can request mode `0o600` so the file is created
+/// non-readable by other users from the very first byte. On Windows the
+/// `mode` field is ignored.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicWriteOptions {
+	#[cfg(unix)]
+	pub mode: Option<u32>,
+	/// Whether to fsync the parent directory after rename (Unix only).
+	/// Defaults to true; durability matters for auth tokens and cache manifests.
+	pub fsync_parent: bool,
+}
+
+impl Default for AtomicWriteOptions {
+	fn default() -> Self {
+		Self {
+			#[cfg(unix)]
+			mode: None,
+			fsync_parent: true,
+		}
+	}
+}
+
+/// Atomically write `data` to `path`.
+///
+/// Writes to `<path>.tmp` first, fsyncs the data, then renames into place.
+/// Optionally fsyncs the parent directory so the rename is durable across
+/// power loss (Unix only — Windows doesn't expose directory fsync).
+///
+/// If anything fails, the temp file is cleaned up.
+pub fn atomic_write_bytes(
+	path: &Path,
+	data: &[u8],
+	opts: AtomicWriteOptions,
+) -> std::io::Result<()> {
+	if let Some(parent) = path.parent() {
+		std::fs::create_dir_all(parent)?;
+	}
+
+	let tmp_path = path.with_extension("tmp");
+
+	// Scope: ensure the file handle is closed before the rename so Windows
+	// doesn't trip on a sharing violation, and so fsync_all completes.
+	let write_result = {
+		let mut open_opts = std::fs::OpenOptions::new();
+		open_opts.write(true).create(true).truncate(true);
+
+		#[cfg(unix)]
+		if let Some(mode) = opts.mode {
+			use std::os::unix::fs::OpenOptionsExt;
+			open_opts.mode(mode);
+		}
+
+		(|| -> std::io::Result<()> {
+			let mut file = open_opts.open(&tmp_path)?;
+			file.write_all(data)?;
+			file.sync_all()
+		})()
+	};
+
+	if let Err(e) = write_result {
+		let _ = std::fs::remove_file(&tmp_path);
+		return Err(e);
+	}
+
+	if let Err(e) = std::fs::rename(&tmp_path, path) {
+		let _ = std::fs::remove_file(&tmp_path);
+		return Err(e);
+	}
+
+	#[cfg(unix)]
+	if opts.fsync_parent
+		&& let Some(parent) = path.parent()
+		&& let Ok(dir) = std::fs::File::open(parent)
+	{
+		// Best-effort: on filesystems that don't support dir fsync (some FUSE)
+		// this returns EINVAL — not worth aborting a successful write.
+		let _ = dir.sync_all();
+	}
+
+	#[cfg(not(unix))]
+	let _ = opts.fsync_parent;
+
+	Ok(())
+}
 
 /// Recursively search for a file by name, starting from `dir`.
 pub fn find_file_recursive(
@@ -91,43 +179,27 @@ fn list_files_recursive(
 	Ok(())
 }
 
-/// Write data to a file with restricted permissions.
+/// Atomically write `data` to a file with restricted permissions.
 ///
-/// On Unix, creates the file with `0o600` permissions from the start (no
-/// window where the file is world-readable), then writes data.
+/// On Unix, the temp file is created with `0o600` from the first byte (no
+/// window where the file is world-readable), data is fsynced, then renamed
+/// into place, and the parent directory is fsynced so the rename survives
+/// power loss.
+///
 /// On Windows, the file inherits the per-user ACL of the parent directory
-/// (typically `%APPDATA%`), which provides equivalent protection.
+/// (typically `%APPDATA%`), which provides equivalent protection. The
+/// write is still atomic via write-tmp + rename.
 pub fn write_secret_file(
 	path: &Path,
 	data: &str,
 ) -> Result<()> {
-	if let Some(parent) = path.parent() {
-		std::fs::create_dir_all(parent)
-			.context("Failed to create parent directory")?;
-	}
-
-	#[cfg(unix)]
-	{
-		use std::os::unix::fs::OpenOptionsExt;
-		std::fs::OpenOptions::new()
-			.write(true)
-			.create(true)
-			.truncate(true)
-			.mode(0o600)
-			.open(path)
-			.and_then(|mut f| {
-				use std::io::Write;
-				f.write_all(data.as_bytes())
-			})
-			.context("Failed to write secret file")?;
-	}
-
-	#[cfg(not(unix))]
-	{
-		std::fs::write(path, data).context("Failed to write file")?;
-	}
-
-	Ok(())
+	let opts = AtomicWriteOptions {
+		#[cfg(unix)]
+		mode: Some(0o600),
+		fsync_parent: true,
+	};
+	atomic_write_bytes(path, data.as_bytes(), opts)
+		.context("Failed to write secret file")
 }
 
 /// RAII guard that removes a directory tree when dropped.

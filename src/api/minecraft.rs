@@ -45,6 +45,10 @@ impl MinecraftClient {
 	}
 
 	/// Downloads a Minecraft JAR (client or server) if not already cached.
+	///
+	/// Streams chunk-by-chunk to disk and verifies SHA-1 from the on-disk file
+	/// before commiting. The client.jar / server.jar can be 40–50 MB; the
+	/// previous implementation buffered the whole body in memory.
 	pub async fn download_jar(
 		&self,
 		download_info: &DownloadInfo,
@@ -61,30 +65,22 @@ impl MinecraftClient {
 			return Ok(dest);
 		}
 
-		std::fs::create_dir_all(&version_dir)?;
-
 		tracing::info!("Downloading {}...", filename);
-		let response =
-			self.send_retried(&download_info.url, Vec::new()).await?;
-		let response = Self::ensure_success(response)?;
-		let bytes = response.bytes().await?;
 
-		let computed_sha1 =
-			crate::types::HashType::Sha1.compute_for_bytes(&bytes);
-		if computed_sha1 != download_info.sha1 {
-			return Err(ApiError::HashMismatch {
-				name: filename,
-				expected: download_info.sha1.clone(),
-				actual: computed_sha1,
-			});
-		}
-
-		let dest_clone = dest.clone();
-		tokio::task::spawn_blocking(move || {
-			std::fs::write(&dest_clone, &bytes)
-		})
+		crate::api::streaming::download_to_file(
+			&self.client,
+			&download_info.url,
+			&dest,
+			crate::api::streaming::HashPolicy::Required(
+				crate::api::streaming::ExpectedHash {
+					hash_type: crate::types::HashType::Sha1,
+					hex: &download_info.sha1,
+				},
+			),
+			&filename,
+		)
 		.await
-		.map_err(|e| ApiError::Network(e.to_string()))??;
+		.map_err(|e| ApiError::Network(format!("{:#}", e)))?;
 
 		Ok(dest)
 	}
@@ -106,11 +102,17 @@ impl MinecraftClient {
 
 		let index_file = index_dir.join(format!("{}.json", asset_index.id));
 		if !index_file.exists() {
-			let response =
-				self.send_retried(&asset_index.url, Vec::new()).await?;
-			let response = Self::ensure_success(response)?;
-			let bytes = response.bytes().await?;
-			std::fs::write(&index_file, &bytes)?;
+			crate::api::streaming::download_to_file(
+				&self.client,
+				&asset_index.url,
+				&index_file,
+				crate::api::streaming::HashPolicy::AcceptedUnhashed {
+					reason: "version manifest references asset index URL without a separate checksum",
+				},
+				&format!("asset index {}", asset_index.id),
+			)
+			.await
+			.map_err(|e| ApiError::Network(format!("{:#}", e)))?;
 		}
 
 		let index_data = std::fs::read_to_string(&index_file)?;
@@ -132,6 +134,11 @@ impl MinecraftClient {
 			return Ok(());
 		}
 
+		// Semaphore caps in-flight downloads. The previous version also had a
+		// redundant "while tasks.len() > MAX" drain loop inside the spawn
+		// loop; with `acquire_owned().await` already blocking, that was just
+		// extra bookkeeping. The streaming helper bounds memory per task to
+		// the chunk size, so we no longer accumulate full bodies in RAM.
 		let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(
 			MAX_CONCURRENT_ASSET_DOWNLOADS,
 		));
@@ -149,54 +156,27 @@ impl MinecraftClient {
 			tasks.spawn(async move {
 				let _permit = permit;
 				let prefix = &object.hash[..2];
-				let obj_dir = objects_dir.join(prefix);
+				let obj_path = objects_dir.join(prefix).join(&object.hash);
 				let url = format!(
 					"https://resources.download.minecraft.net/{}/{}",
 					prefix, object.hash
 				);
-				let response = client.get(&url).send().await?;
-				if !response.status().is_success() {
-					return Err(ApiError::http(
-						response.status().as_u16(),
-						format!("Failed to download asset {}", name),
-					));
-				}
-				let bytes = response.bytes().await?;
-				let computed_sha1 =
-					crate::types::HashType::Sha1.compute_for_bytes(&bytes);
-				if computed_sha1 != object.hash {
-					return Err(ApiError::HashMismatch {
-						name: name.clone(),
-						expected: object.hash,
-						actual: computed_sha1,
-					});
-				}
-				let obj_path = obj_dir.join(&object.hash);
-				tokio::task::spawn_blocking(move || {
-					std::fs::create_dir_all(&obj_dir)?;
-					std::fs::write(&obj_path, &bytes)
-				})
+				crate::api::streaming::download_to_file(
+					&client,
+					&url,
+					&obj_path,
+					crate::api::streaming::HashPolicy::Required(
+						crate::api::streaming::ExpectedHash {
+							hash_type: crate::types::HashType::Sha1,
+							hex: &object.hash,
+						},
+					),
+					&name,
+				)
 				.await
-				.map_err(|e| ApiError::Network(e.to_string()))??;
-				Ok(name)
+				.map(|_| name)
+				.map_err(|e| ApiError::Network(format!("{:#}", e)))
 			});
-
-			while tasks.len() > MAX_CONCURRENT_ASSET_DOWNLOADS {
-				if let Some(result) = tasks.join_next().await {
-					match result {
-						Ok(Ok(_)) => {
-							downloaded += 1;
-						}
-						Ok(Err(e)) => {
-							tracing::warn!("{}", e);
-							failures.push(format!("{}", e));
-						}
-						Err(e) => {
-							failures.push(format!("task panicked: {}", e));
-						}
-					}
-				}
-			}
 		}
 
 		while let Some(result) = tasks.join_next().await {
@@ -462,6 +442,7 @@ pub fn resolve_mc_jvm_args(
 }
 
 /// Resolves game arguments from the MC version info for the current platform.
+#[allow(dead_code)] // counterpart to JVM-arg resolution; kept symmetric for future use
 pub fn resolve_mc_game_args(version_info: &VersionInfo) -> Vec<String> {
 	if let Some(ref arguments) = version_info.arguments {
 		resolve_args_array(&arguments.game)

@@ -58,13 +58,17 @@ impl App {
 }
 
 /// Global application context shared across all CLI commands.
+///
+/// Fields are private; access goes through accessor methods so that any
+/// future cross-cutting concern (caching, instrumentation, invariant checks)
+/// has a single place to land. Callers needing mutation use `global_mut()`.
 pub struct AppContext {
-	pub global: GlobalConfig,
-	pub modpack: Option<App>,
-	pub cwd: PathBuf,
-	pub registry: Arc<SourceRegistry>,
-	pub insecure: bool,
-	pub http_client: reqwest::Client,
+	global: GlobalConfig,
+	modpack: Option<App>,
+	cwd: PathBuf,
+	registry: Arc<SourceRegistry>,
+	insecure: bool,
+	http_client: reqwest::Client,
 	cache_dir: PathBuf,
 	jar_cache: JarCache,
 }
@@ -165,19 +169,20 @@ impl AppContext {
 	}
 
 	fn build_http_client(insecure: bool) -> reqwest::Client {
-		let mut builder = reqwest::Client::builder()
+		if !insecure {
+			return crate::api::default_http_client();
+		}
+		let builder = reqwest::Client::builder()
 			.user_agent(format!(
 				"AmphibianNetwork/yammm/{} (contact@amphibian.network)",
 				env!("CARGO_PKG_VERSION")
 			))
-			.connect_timeout(std::time::Duration::from_secs(10))
-			.timeout(std::time::Duration::from_secs(30));
-		if insecure {
-			builder = builder.danger_accept_invalid_certs(true);
-		}
+			.connect_timeout(crate::api::DEFAULT_CONNECT_TIMEOUT)
+			.timeout(crate::api::DEFAULT_REQUEST_TIMEOUT)
+			.danger_accept_invalid_certs(true);
 		builder.build().unwrap_or_else(|e| {
 			tracing::warn!("Failed to build HTTP client, using default: {}", e);
-			reqwest::Client::new()
+			crate::api::default_http_client()
 		})
 	}
 
@@ -226,6 +231,33 @@ impl AppContext {
 	/// Get the shared JAR cache instance.
 	pub fn jar_cache(&self) -> &JarCache {
 		&self.jar_cache
+	}
+
+	/// Read-only access to global config (API keys, output prefs, cache dir).
+	pub fn global(&self) -> &GlobalConfig {
+		&self.global
+	}
+
+	/// Mutable access to global config — only the `config` command should
+	/// need this. Callers are responsible for persisting via `save()`.
+	pub fn global_mut(&mut self) -> &mut GlobalConfig {
+		&mut self.global
+	}
+
+	/// The shared source registry (Modrinth / CurseForge / URL providers).
+	pub fn registry(&self) -> &Arc<SourceRegistry> {
+		&self.registry
+	}
+
+	/// The shared HTTP client. Cheap to clone — internal connection pool is
+	/// shared across clones.
+	pub fn http_client(&self) -> &reqwest::Client {
+		&self.http_client
+	}
+
+	/// Optional modpack reference; `None` when not invoked inside a pack.
+	pub fn modpack(&self) -> Option<&App> {
+		self.modpack.as_ref()
 	}
 
 	/// Check if we're currently in a modpack directory.

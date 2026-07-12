@@ -18,7 +18,7 @@ fn main() {
 		tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 	let result = rt.block_on(cli.exec());
 	if let Err(e) = result {
-		yammm::utils::print_error(&e);
+		yammm::print_error(&e);
 		std::process::exit(yammm::exit_code(&e));
 	}
 }

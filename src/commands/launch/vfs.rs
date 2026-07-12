@@ -53,15 +53,11 @@ impl VfsTree {
 						},
 					);
 				}
-			} else {
-				if let VfsEntry::Dir { children } = current {
-					children.entry(name.clone()).or_insert_with(|| {
-						VfsEntry::Dir {
-							children: BTreeMap::new(),
-						}
+			} else if let VfsEntry::Dir { children } = current {
+				current =
+					children.entry(name).or_insert_with(|| VfsEntry::Dir {
+						children: BTreeMap::new(),
 					});
-					current = children.get_mut(&name).unwrap();
-				}
 			}
 		}
 	}
@@ -76,12 +72,10 @@ impl VfsTree {
 		for component in virtual_path.components() {
 			let name = component.as_os_str().to_string_lossy().to_string();
 			if let VfsEntry::Dir { children } = current {
-				children
-					.entry(name.clone())
-					.or_insert_with(|| VfsEntry::Dir {
+				current =
+					children.entry(name).or_insert_with(|| VfsEntry::Dir {
 						children: BTreeMap::new(),
 					});
-				current = children.get_mut(&name).unwrap();
 			}
 		}
 	}
@@ -165,4 +159,130 @@ fn realize_entry(
 		}
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn child_names(entry: &VfsEntry) -> Vec<String> {
+		match entry {
+			VfsEntry::Dir { children } => children.keys().cloned().collect(),
+			VfsEntry::File { .. } => Vec::new(),
+		}
+	}
+
+	fn get_child<'a>(
+		entry: &'a VfsEntry,
+		name: &str,
+	) -> Option<&'a VfsEntry> {
+		match entry {
+			VfsEntry::Dir { children } => children.get(name),
+			VfsEntry::File { .. } => None,
+		}
+	}
+
+	#[test]
+	fn test_empty_tree_root_is_dir_with_no_children() {
+		let tree = VfsTree::new();
+		assert!(matches!(tree.root(), VfsEntry::Dir { .. }));
+		assert!(child_names(tree.root()).is_empty());
+	}
+
+	#[test]
+	fn test_add_file_at_root() {
+		let mut tree = VfsTree::new();
+		tree.add_file(Path::new("a.jar"), PathBuf::from("/src/a.jar"));
+
+		let names = child_names(tree.root());
+		assert_eq!(names, vec!["a.jar"]);
+
+		match get_child(tree.root(), "a.jar").unwrap() {
+			VfsEntry::File { source } => {
+				assert_eq!(source, &PathBuf::from("/src/a.jar"));
+			}
+			_ => panic!("expected file at a.jar"),
+		}
+	}
+
+	#[test]
+	fn test_add_file_creates_intermediate_dirs() {
+		let mut tree = VfsTree::new();
+		tree.add_file(
+			Path::new("mods/sodium.jar"),
+			PathBuf::from("/cache/sodium.jar"),
+		);
+
+		// Root should have a `mods/` dir, which contains the file.
+		let mods =
+			get_child(tree.root(), "mods").expect("mods dir not created");
+		assert!(matches!(mods, VfsEntry::Dir { .. }));
+		assert!(matches!(
+			get_child(mods, "sodium.jar"),
+			Some(VfsEntry::File { .. })
+		));
+	}
+
+	#[test]
+	fn test_add_file_overwrites_at_same_path() {
+		let mut tree = VfsTree::new();
+		tree.add_file(Path::new("a.jar"), PathBuf::from("/src/v1.jar"));
+		tree.add_file(Path::new("a.jar"), PathBuf::from("/src/v2.jar"));
+
+		match get_child(tree.root(), "a.jar").unwrap() {
+			VfsEntry::File { source } => {
+				assert_eq!(
+					source,
+					&PathBuf::from("/src/v2.jar"),
+					"last add at same path wins"
+				);
+			}
+			_ => panic!("expected file"),
+		}
+	}
+
+	#[test]
+	fn test_add_dir_only() {
+		let mut tree = VfsTree::new();
+		tree.add_dir(Path::new("config/overrides"));
+
+		let config = get_child(tree.root(), "config").expect("config dir");
+		let overrides = get_child(config, "overrides").expect("overrides dir");
+		assert!(matches!(overrides, VfsEntry::Dir { .. }));
+	}
+
+	#[test]
+	fn test_add_dir_from_source_missing_dir_is_noop() {
+		let mut tree = VfsTree::new();
+		tree.add_dir_from_source(
+			Path::new("nope"),
+			Path::new("/definitely-not-a-real-path-xyz123"),
+		);
+		// No panic, no children added.
+		assert!(child_names(tree.root()).is_empty());
+	}
+
+	#[test]
+	fn test_add_dir_from_source_mirrors_real_tree() {
+		let temp = tempfile::tempdir().expect("tempdir");
+		let src = temp.path();
+		// Layout: src/a.txt, src/sub/b.txt
+		std::fs::write(src.join("a.txt"), b"hi").unwrap();
+		std::fs::create_dir(src.join("sub")).unwrap();
+		std::fs::write(src.join("sub").join("b.txt"), b"bye").unwrap();
+
+		let mut tree = VfsTree::new();
+		tree.add_dir_from_source(Path::new("data"), src);
+
+		let data = get_child(tree.root(), "data").expect("data dir");
+		assert!(matches!(
+			get_child(data, "a.txt"),
+			Some(VfsEntry::File { .. })
+		));
+		let sub = get_child(data, "sub").expect("sub dir");
+		assert!(matches!(
+			get_child(sub, "b.txt"),
+			Some(VfsEntry::File { .. })
+		));
+	}
 }

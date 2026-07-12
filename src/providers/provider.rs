@@ -6,18 +6,23 @@
 //! when adding variants.
 
 use crate::providers::curseforge::CurseForgeSource;
+use crate::providers::error::{ProviderError, ProviderResult};
 use crate::providers::modrinth::ModrinthSource;
 use crate::providers::url::UrlSource;
 use crate::types::{
 	ModEnv, ModInfo, ModVersion, SourceDependency, VersionFilters,
 };
-use anyhow::Result;
 
 /// Filters used when searching for mods.
+///
+/// `limit` caps the number of hits returned in a single request; `offset`
+/// skips that many hits from the start of the result set. Both are 0-based
+/// and provider-bounded — Modrinth caps `limit` at 100, CurseForge at 50.
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilters {
 	pub version: VersionFilters,
 	pub limit: Option<usize>,
+	pub offset: Option<usize>,
 }
 
 impl SearchFilters {
@@ -25,11 +30,27 @@ impl SearchFilters {
 		version: VersionFilters,
 		limit: Option<usize>,
 	) -> Self {
-		Self { version, limit }
+		Self {
+			version,
+			limit,
+			offset: None,
+		}
+	}
+
+	pub fn with_offset(
+		mut self,
+		offset: Option<usize>,
+	) -> Self {
+		self.offset = offset;
+		self
 	}
 }
 
 /// Trait that all mod source providers must implement.
+///
+/// `async fn` in trait + closed-set enum dispatch (see `Provider` below)
+/// — no `Box<dyn>`, so we don't pay for boxed futures. The
+/// `#[allow(async_fn_in_trait)]` is intentional and load-bearing.
 #[allow(async_fn_in_trait)]
 pub trait ModSourceProvider {
 	fn name(&self) -> &str;
@@ -42,21 +63,21 @@ pub trait ModSourceProvider {
 		&self,
 		query: &str,
 		filters: &SearchFilters,
-	) -> Result<Vec<ModInfo>>;
+	) -> ProviderResult<Vec<ModInfo>>;
 	async fn get_mod(
 		&self,
 		mod_id: &str,
-	) -> Result<ModInfo>;
+	) -> ProviderResult<ModInfo>;
 	async fn get_versions(
 		&self,
 		mod_id: &str,
 		filters: &VersionFilters,
-	) -> Result<Vec<ModVersion>>;
+	) -> ProviderResult<Vec<ModVersion>>;
 	async fn get_dependencies(
 		&self,
 		mod_id: &str,
 		version_id: &str,
-	) -> Result<Vec<SourceDependency>>;
+	) -> ProviderResult<Vec<SourceDependency>>;
 }
 
 /// Closed-set mod source provider with manual dispatch.
@@ -114,14 +135,14 @@ impl Provider {
 		&self,
 		query: &str,
 		filters: &SearchFilters,
-	) -> Result<Vec<ModInfo>> {
+	) -> ProviderResult<Vec<ModInfo>> {
 		dispatch!(self, search(query, filters).await)
 	}
 
 	pub async fn get_mod(
 		&self,
 		mod_id: &str,
-	) -> Result<ModInfo> {
+	) -> ProviderResult<ModInfo> {
 		dispatch!(self, get_mod(mod_id).await)
 	}
 
@@ -129,7 +150,7 @@ impl Provider {
 		&self,
 		mod_id: &str,
 		filters: &VersionFilters,
-	) -> Result<Vec<ModVersion>> {
+	) -> ProviderResult<Vec<ModVersion>> {
 		dispatch!(self, get_versions(mod_id, filters).await)
 	}
 
@@ -137,7 +158,7 @@ impl Provider {
 		&self,
 		mod_id: &str,
 		version_id: &str,
-	) -> Result<Vec<SourceDependency>> {
+	) -> ProviderResult<Vec<SourceDependency>> {
 		dispatch!(self, get_dependencies(mod_id, version_id).await)
 	}
 
@@ -146,18 +167,27 @@ impl Provider {
 		&self,
 		mod_id: &str,
 		filters: &VersionFilters,
-	) -> Result<ModVersion> {
+	) -> ProviderResult<ModVersion> {
 		let versions = self.get_versions(mod_id, filters).await?;
 		versions
 			.into_iter()
 			.max_by(|a, b| a.release_date.cmp(&b.release_date))
-			.ok_or_else(|| {
-				crate::errors::YammmError::mod_not_found(format!(
-					"No versions found for {}",
-					mod_id
-				))
-				.into()
+			.ok_or_else(|| ProviderError::NotFound {
+				provider: self.name_static(),
+				what: format!("no versions found for {}", mod_id),
 			})
+	}
+
+	/// Returns the provider name as a `'static` string for use in error
+	/// payloads where we'd otherwise have to clone.
+	fn name_static(&self) -> &'static str {
+		match self {
+			Self::Modrinth(_) => "modrinth",
+			Self::CurseForge(_) => "curseforge",
+			Self::Url(_) => "url",
+			#[cfg(test)]
+			Self::Mock(_) => "mock",
+		}
 	}
 }
 

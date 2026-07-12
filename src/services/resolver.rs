@@ -1,11 +1,16 @@
 //! BFS dependency resolver with cycle detection and optional-dep propagation.
 //!
-//! Required deps are dequeued before optional ones (fail fast).
+//! Required deps are dequeued before optional ones (fail fast) by keeping two
+//! separate `VecDeque`s — required gets fully drained before optional gets a
+//! turn. The previous implementation used `Vec::remove(idx)` after an O(n)
+//! linear scan to find a required entry, which made resolution quadratic in
+//! the dependency count.
+//!
 //! Optional parents downgrade all transitive deps to optional.
 //! Cycles are detected via ancestor tracking per queue entry.
 
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::providers::registry::SourceRegistry;
@@ -31,7 +36,7 @@ pub struct ResolvedMod {
 /// Internal queue entry for BFS traversal. `ancestors` enables cycle detection.
 struct QueueEntry {
 	dep: Dependency,
-	ancestors: HashSet<String>,
+	ancestors: HashSet<ModIdentity>,
 }
 
 /// Dependency resolver backed by a `SourceRegistry`.
@@ -77,20 +82,25 @@ impl DependencyResolver {
 	) -> Result<Vec<ResolvedMod>> {
 		let mut resolved: HashSet<ModIdentity> = HashSet::new();
 		let mut result: Vec<ResolvedMod> = Vec::new();
-		let mut queue: Vec<QueueEntry> = Vec::new();
+		// Two queues so the "required-first" priority is O(1) per pop instead
+		// of an O(n) linear scan + `Vec::remove` shift. We drain `required`
+		// fully before touching `optional`.
+		let mut required: VecDeque<QueueEntry> = VecDeque::new();
+		let mut optional: VecDeque<QueueEntry> = VecDeque::new();
 
-		queue.push(QueueEntry {
+		required.push_back(QueueEntry {
 			dep: Dependency::new(mod_id, source, DependencyKind::Required),
 			ancestors: HashSet::new(),
 		});
 
-		while !queue.is_empty() {
-			// Priority: required deps first (fail fast).
-			let idx = queue
-				.iter()
-				.position(|e| e.dep.kind.is_required())
-				.unwrap_or(0);
-			let entry = queue.remove(idx);
+		loop {
+			let entry = match required.pop_front() {
+				Some(e) => e,
+				None => match optional.pop_front() {
+					Some(e) => e,
+					None => break,
+				},
+			};
 			let dep = entry.dep;
 
 			let key = ModIdentity {
@@ -109,7 +119,7 @@ impl DependencyResolver {
 			}
 
 			// If this mod appears in the ancestor chain, we've got a cycle.
-			if entry.ancestors.contains(&key.to_string()) {
+			if entry.ancestors.contains(&key) {
 				tracing::debug!(
 					"Cycle detected: {} appears in ancestors {:?}",
 					key,
@@ -153,16 +163,16 @@ impl DependencyResolver {
 					// canonical key (if different) so that deps referencing the
 					// same mod via raw ID vs slug are both caught.
 					let mut ancestors_for_children = entry.ancestors.clone();
-					ancestors_for_children.insert(key.to_string());
+					ancestors_for_children.insert(key.clone());
 					if canonical_key != key {
-						ancestors_for_children
-							.insert(canonical_key.to_string());
+						ancestors_for_children.insert(canonical_key.clone());
 					}
 
 					if let Err(e) = self
 						.queue_dependencies_with_ancestors(
 							&resolved_mod,
-							&mut queue,
+							&mut required,
+							&mut optional,
 							&ancestors_for_children,
 						)
 						.await
@@ -195,12 +205,15 @@ impl DependencyResolver {
 	}
 
 	/// Queue dependencies for a resolved mod using a pre-built ancestor set.
-	/// Optional parents downgrade children to optional.
+	/// Optional parents downgrade children to optional. Pushes each new
+	/// `QueueEntry` onto the queue matching its `kind` so the priority is
+	/// preserved without a re-scan.
 	async fn queue_dependencies_with_ancestors(
 		&self,
 		resolved: &ResolvedMod,
-		queue: &mut Vec<QueueEntry>,
-		ancestors: &HashSet<String>,
+		required: &mut VecDeque<QueueEntry>,
+		optional: &mut VecDeque<QueueEntry>,
+		ancestors: &HashSet<ModIdentity>,
 	) -> Result<()> {
 		let provider = self.registry.get(&resolved.source)?;
 
@@ -280,7 +293,7 @@ impl DependencyResolver {
 					dep_type
 				};
 
-			queue.push(QueueEntry {
+			let entry = QueueEntry {
 				dep: Dependency {
 					mod_id: dep.mod_id,
 					source: dep_source,
@@ -294,7 +307,12 @@ impl DependencyResolver {
 					),
 				},
 				ancestors: ancestors.clone(),
-			});
+			};
+			if effective_dep_type.is_required() {
+				required.push_back(entry);
+			} else {
+				optional.push_back(entry);
+			}
 		}
 
 		Ok(())
@@ -697,5 +715,395 @@ mod tests {
 			DependencyKind::Optional,
 			"optional deps of required parents should stay Optional"
 		);
+	}
+
+	#[tokio::test]
+	async fn test_required_dep_resolution_failure_propagates() {
+		// A required dep that cannot be resolved must fail the whole resolution
+		// — silently dropping it would let users install broken modpacks.
+		let (resolver, mock) = setup_resolver();
+
+		mock.add_mod("A", test_util::make_mod_info("A"));
+		mock.add_versions("A", vec![test_util::make_version("1.0", "vid-a")]);
+		mock.add_deps(
+			"vid-a",
+			vec![test_util::make_dep("missing", DependencyKind::Required)],
+		);
+
+		let result = resolver.resolve("A", ModSource::modrinth("A")).await;
+		assert!(
+			result.is_err(),
+			"required dep missing from mock must propagate as Err"
+		);
+	}
+
+	#[tokio::test]
+	async fn test_optional_dep_resolution_failure_is_silent() {
+		// An optional dep that cannot be resolved is logged and dropped — the
+		// rest of the tree continues. Users should still get their pack.
+		let (resolver, mock) = setup_resolver();
+
+		mock.add_mod("A", test_util::make_mod_info("A"));
+		mock.add_versions("A", vec![test_util::make_version("1.0", "vid-a")]);
+		mock.add_deps(
+			"vid-a",
+			vec![test_util::make_dep("ghost", DependencyKind::Optional)],
+		);
+
+		let result = resolver
+			.resolve("A", ModSource::modrinth("A"))
+			.await
+			.expect(
+				"optional resolution failure must not fail the whole resolve",
+			);
+
+		assert_eq!(result.len(), 1);
+		assert_eq!(result[0].mod_id, "A");
+	}
+
+	#[tokio::test]
+	async fn test_embedded_dep_is_skipped_and_does_not_recurse() {
+		// Embedded deps live inside the parent JAR — they must not appear in
+		// the result AND their own transitive deps must not be enqueued.
+		let (resolver, mock) = setup_resolver();
+
+		mock.add_mod("A", test_util::make_mod_info("A"));
+		mock.add_mod("B", test_util::make_mod_info("B"));
+		mock.add_mod("C", test_util::make_mod_info("C"));
+		mock.add_versions("A", vec![test_util::make_version("1.0", "vid-a")]);
+		mock.add_versions("B", vec![test_util::make_version("1.0", "vid-b")]);
+		mock.add_versions("C", vec![test_util::make_version("1.0", "vid-c")]);
+
+		mock.add_deps(
+			"vid-a",
+			vec![test_util::make_dep("B", DependencyKind::Embedded)],
+		);
+		// If the resolver mistakenly walked into B, it would queue C and we'd
+		// see C in the result — this assertion catches that regression.
+		mock.add_deps(
+			"vid-b",
+			vec![test_util::make_dep("C", DependencyKind::Required)],
+		);
+		mock.add_deps("vid-c", vec![]);
+
+		let result = resolver
+			.resolve("A", ModSource::modrinth("A"))
+			.await
+			.unwrap();
+
+		let ids: Vec<&str> = result.iter().map(|m| m.mod_id.as_str()).collect();
+		assert_eq!(
+			ids,
+			vec!["A"],
+			"embedded dep B and its child C must not appear"
+		);
+	}
+
+	#[tokio::test]
+	async fn test_incompatible_dep_is_skipped() {
+		// Incompatible markers are advisory — the resolver should not try to
+		// install them. The current implementation simply skips queuing.
+		let (resolver, mock) = setup_resolver();
+
+		mock.add_mod("A", test_util::make_mod_info("A"));
+		mock.add_versions("A", vec![test_util::make_version("1.0", "vid-a")]);
+		mock.add_deps(
+			"vid-a",
+			vec![test_util::make_dep("rival", DependencyKind::Incompatible)],
+		);
+
+		let result = resolver
+			.resolve("A", ModSource::modrinth("A"))
+			.await
+			.unwrap();
+
+		assert_eq!(result.len(), 1);
+		assert_eq!(result[0].mod_id, "A");
+	}
+
+	#[tokio::test]
+	async fn test_self_reference_is_filtered() {
+		// A mod listing itself as a dep (Modrinth occasionally returns this
+		// when slug == raw project id) must not loop or duplicate the entry.
+		let (resolver, mock) = setup_resolver();
+
+		mock.add_mod("A", test_util::make_mod_info("A"));
+		mock.add_versions("A", vec![test_util::make_version("1.0", "vid-a")]);
+		mock.add_deps(
+			"vid-a",
+			vec![test_util::make_dep("A", DependencyKind::Required)],
+		);
+
+		let result = resolver
+			.resolve("A", ModSource::modrinth("A"))
+			.await
+			.unwrap();
+
+		assert_eq!(result.len(), 1);
+		assert_eq!(result[0].mod_id, "A");
+	}
+
+	#[tokio::test]
+	async fn test_filters_do_not_break_resolution() {
+		// Setting minecraft_version + loader filters must flow through to
+		// version lookup without changing the resolved set when the mock
+		// doesn't enforce them.
+		let (_resolver, mock) = setup_resolver();
+		let resolver = DependencyResolver::new(Arc::new(
+			SourceRegistry::new_with_mock(mock.clone()),
+		))
+		.with_minecraft_version("1.20.4")
+		.with_loader(LoaderType::Fabric);
+
+		mock.add_mod("A", test_util::make_mod_info("A"));
+		mock.add_versions("A", vec![test_util::make_version("1.0", "vid-a")]);
+		mock.add_deps("vid-a", vec![]);
+
+		let result = resolver
+			.resolve("A", ModSource::modrinth("A"))
+			.await
+			.unwrap();
+
+		assert_eq!(result.len(), 1);
+		assert_eq!(result[0].mod_id, "A");
+	}
+
+	#[tokio::test]
+	async fn test_diamond_dependency_with_optional_branch() {
+		// A→B (req), A→C (opt), both B and C depend on D (req).
+		// D should appear once, and because it's reachable via a required
+		// path (A→B→D), it must end up Required, not downgraded to Optional.
+		let (resolver, mock) = setup_resolver();
+
+		mock.add_mod("A", test_util::make_mod_info("A"));
+		mock.add_mod("B", test_util::make_mod_info("B"));
+		mock.add_mod("C", test_util::make_mod_info("C"));
+		mock.add_mod("D", test_util::make_mod_info("D"));
+		mock.add_versions("A", vec![test_util::make_version("1.0", "vid-a")]);
+		mock.add_versions("B", vec![test_util::make_version("1.0", "vid-b")]);
+		mock.add_versions("C", vec![test_util::make_version("1.0", "vid-c")]);
+		mock.add_versions("D", vec![test_util::make_version("1.0", "vid-d")]);
+
+		mock.add_deps(
+			"vid-a",
+			vec![
+				test_util::make_dep("B", DependencyKind::Required),
+				test_util::make_dep("C", DependencyKind::Optional),
+			],
+		);
+		mock.add_deps(
+			"vid-b",
+			vec![test_util::make_dep("D", DependencyKind::Required)],
+		);
+		mock.add_deps(
+			"vid-c",
+			vec![test_util::make_dep("D", DependencyKind::Required)],
+		);
+		mock.add_deps("vid-d", vec![]);
+
+		let result = resolver
+			.resolve("A", ModSource::modrinth("A"))
+			.await
+			.unwrap();
+
+		let d_count = result.iter().filter(|m| m.mod_id == "D").count();
+		assert_eq!(d_count, 1, "D must appear exactly once across the diamond");
+
+		let d = result.iter().find(|m| m.mod_id == "D").unwrap();
+		assert_eq!(
+			d.dependency_type,
+			DependencyKind::Required,
+			"D was reached via the required branch first; it must stay Required"
+		);
+	}
+}
+
+#[cfg(test)]
+mod proptests {
+	//! Property tests for [`DependencyResolver::resolve`].
+	//!
+	//! The example-based tests above hammer specific shapes (diamond,
+	//! cycle, mutual deps). Proptest fills in the rest: it generates
+	//! arbitrary DAGs, runs the resolver, and asserts the
+	//! transitive-closure property — every reachable node from the root
+	//! must appear in the result, and only those nodes may appear.
+
+	use super::*;
+	use crate::providers::mock::MockSource;
+	use crate::providers::registry::SourceRegistry;
+	use crate::test_util;
+	use proptest::collection::vec;
+	use proptest::prelude::*;
+
+	/// Generate a random DAG over `0..n` nodes by, for each node `i`,
+	/// picking a subset of `[i+1..n]` as its dependencies. Edges only
+	/// go to higher-numbered nodes — that's the topological-order
+	/// invariant that rules out cycles by construction.
+	fn dag(n: usize) -> impl Strategy<Value = Vec<Vec<usize>>> {
+		let edge_lists: Vec<_> = (0..n)
+			.map(|i| {
+				let candidates: Vec<usize> = ((i + 1)..n).collect();
+				if candidates.is_empty() {
+					// Leaf node: no outgoing edges possible. proptest's
+					// `select` panics on empty collections, so handle
+					// this case explicitly with a Just strategy.
+					Just(Vec::<usize>::new()).boxed()
+				} else {
+					// Each candidate is included with ~50% probability,
+					// capped at 4 edges per node to keep the graph small.
+					let cap = 4.min(candidates.len());
+					vec(proptest::sample::select(candidates), 0..=cap)
+						.prop_map(|mut v| {
+							v.sort();
+							v.dedup();
+							v
+						})
+						.boxed()
+				}
+			})
+			.collect();
+		edge_lists
+	}
+
+	/// Reachability via plain BFS over the edge list — the reference
+	/// implementation we compare the resolver against.
+	fn reachable(
+		root: usize,
+		edges: &[Vec<usize>],
+	) -> std::collections::HashSet<usize> {
+		let mut seen = std::collections::HashSet::new();
+		let mut queue = std::collections::VecDeque::new();
+		queue.push_back(root);
+		seen.insert(root);
+		while let Some(node) = queue.pop_front() {
+			for &next in &edges[node] {
+				if seen.insert(next) {
+					queue.push_back(next);
+				}
+			}
+		}
+		seen
+	}
+
+	fn build_mock_from_dag(edges: &[Vec<usize>]) -> MockSource {
+		let mock = MockSource::new();
+		for (i, deps) in edges.iter().enumerate() {
+			let id = format!("M{i}");
+			let vid = format!("v-{i}");
+			mock.add_mod(&id, test_util::make_mod_info(&id));
+			mock.add_versions(&id, vec![test_util::make_version("1.0", &vid)]);
+			let deps: Vec<_> = deps
+				.iter()
+				.map(|&j| {
+					test_util::make_dep(
+						&format!("M{j}"),
+						DependencyKind::Required,
+					)
+				})
+				.collect();
+			mock.add_deps(&vid, deps);
+		}
+		mock
+	}
+
+	proptest! {
+		#![proptest_config(ProptestConfig {
+			// Resolver tests are async and spin up a tokio runtime each
+			// iteration; keep cases low so the suite stays fast.
+			cases: 32,
+			.. ProptestConfig::default()
+		})]
+
+		/// For any DAG, `resolve` returns exactly the set of nodes
+		/// reachable from the root: no more (no spurious additions),
+		/// no fewer (no missed deps).
+		#[test]
+		fn resolve_returns_transitive_closure(
+			edges in dag(6)
+		) {
+			let mock = build_mock_from_dag(&edges);
+			let resolver = DependencyResolver::new(Arc::new(
+				SourceRegistry::new_with_mock(mock.clone()),
+			));
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let result = runtime.block_on(
+				resolver.resolve("M0", ModSource::modrinth("M0")),
+			)
+			.expect("resolve must succeed on a cycle-free DAG");
+
+			let resolved_ids: std::collections::HashSet<usize> = result
+				.iter()
+				.filter_map(|m| {
+					m.mod_id.strip_prefix("M").and_then(|s| s.parse().ok())
+				})
+				.collect();
+			let expected = reachable(0, &edges);
+			prop_assert_eq!(
+				resolved_ids, expected,
+				"resolver output must equal the transitive closure of root"
+			);
+		}
+
+		/// `resolve` is deterministic: same input, same output (as a
+		/// set). Order may vary, but membership must not.
+		#[test]
+		fn resolve_is_deterministic(
+			edges in dag(5)
+		) {
+			let mock = build_mock_from_dag(&edges);
+			let resolver = DependencyResolver::new(Arc::new(
+				SourceRegistry::new_with_mock(mock.clone()),
+			));
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+
+			let first: std::collections::HashSet<String> = runtime
+				.block_on(resolver.resolve("M0", ModSource::modrinth("M0")))
+				.unwrap()
+				.into_iter()
+				.map(|m| m.mod_id)
+				.collect();
+			let second: std::collections::HashSet<String> = runtime
+				.block_on(resolver.resolve("M0", ModSource::modrinth("M0")))
+				.unwrap()
+				.into_iter()
+				.map(|m| m.mod_id)
+				.collect();
+			prop_assert_eq!(first, second);
+		}
+
+		/// No mod ever appears twice in the result — even when reached
+		/// through multiple paths (diamond) or shared deps.
+		#[test]
+		fn resolve_returns_each_mod_at_most_once(
+			edges in dag(7)
+		) {
+			let mock = build_mock_from_dag(&edges);
+			let resolver = DependencyResolver::new(Arc::new(
+				SourceRegistry::new_with_mock(mock.clone()),
+			));
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let result = runtime.block_on(
+				resolver.resolve("M0", ModSource::modrinth("M0")),
+			)
+			.unwrap();
+
+			let mut seen = std::collections::HashSet::new();
+			for m in &result {
+				prop_assert!(
+					seen.insert(m.mod_id.clone()),
+					"mod {} appeared twice in resolver output",
+					m.mod_id
+				);
+			}
+		}
 	}
 }

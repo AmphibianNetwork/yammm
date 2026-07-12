@@ -35,6 +35,10 @@ impl InfoCommand {
 		let modpack = &app.config;
 		let storage = &app.storage;
 
+		if output::is_json_mode() {
+			return self.run_json(modpack, storage);
+		}
+
 		match self.command {
 			None => self.display_overview(modpack, storage),
 			Some(InfoSubcommand::List { verbose }) => {
@@ -46,6 +50,33 @@ impl InfoCommand {
 			Some(InfoSubcommand::Tree) => self.display_tree(storage)?,
 		}
 
+		Ok(())
+	}
+
+	fn run_json(
+		&self,
+		modpack: &ModpackManifest,
+		storage: &crate::storage::Storage,
+	) -> Result<()> {
+		match &self.command {
+			None | Some(InfoSubcommand::List { .. }) => {
+				let payload = build_pack_json(modpack, storage);
+				output::emit_json(&payload)?;
+			}
+			Some(InfoSubcommand::Mod { mod_id }) => {
+				let (_, mod_ron) = storage.find_any(mod_id).map_err(|_| {
+					crate::errors::YammmError::mod_not_found(format!(
+						"Mod '{}' not found in mods, resourcepacks, or shaderpacks",
+						mod_id
+					))
+				})?;
+				output::emit_json(&mod_ron)?;
+			}
+			Some(InfoSubcommand::Tree) => {
+				let payload = build_tree_json(storage)?;
+				output::emit_json(&payload)?;
+			}
+		}
 		Ok(())
 	}
 
@@ -100,7 +131,7 @@ impl InfoCommand {
 			Cell::new(shaderpacks.len().to_string()),
 		]);
 
-		println!("{table}");
+		output::raw_block(&table);
 
 		if !mods.is_empty() {
 			output::blank_line();
@@ -130,7 +161,7 @@ impl InfoCommand {
 					Cell::new(&cats),
 				]);
 			}
-			println!("{mod_table}");
+			output::raw_block(&mod_table);
 		}
 	}
 
@@ -230,7 +261,7 @@ impl InfoCommand {
 			table.add_row(vec![Cell::new("Hash"), Cell::new(&hash_display)]);
 		}
 
-		println!("{table}");
+		output::raw_block(&table);
 		Ok(())
 	}
 
@@ -262,18 +293,18 @@ impl InfoCommand {
 				.apply_to(format!("v{}", m.version));
 			let env_str = console::Style::new().cyan().apply_to(m.env.as_str());
 			if m.categories.is_empty() {
-				println!(
+				output::raw_line(format!(
 					"{}{} {} {} [{}]",
 					prefix, name_str, ver_str, env_str, tag
-				);
+				));
 			} else {
 				let cats = console::Style::new()
 					.magenta()
 					.apply_to(format!("[{}]", m.categories.join(", ")));
-				println!(
+				output::raw_line(format!(
 					"{}{} {} {} [{}] {}",
 					prefix, name_str, ver_str, env_str, tag, cats
-				);
+				));
 			}
 
 			let dep_count = m.dependencies.len();
@@ -287,17 +318,148 @@ impl InfoCommand {
 				};
 				let dep_id_str =
 					console::Style::new().dim().apply_to(&dep.mod_id);
-				println!(
+				output::raw_line(format!(
 					"{}{}{} ({})",
 					dep_prefix,
 					dep_branch,
 					dep_id_str,
 					crate::output::dependency_kind_styled(&dep.kind)
-				);
+				));
 			}
 		}
 
 		Ok(())
+	}
+}
+
+/// JSON payload emitted by `info --json` (and `info list --json`).
+///
+/// The shape is stable: scripts and CI pipelines may pin to it. Adding new
+/// fields is backwards-compatible; renaming or removing a field is not.
+#[derive(serde::Serialize)]
+struct PackJson<'a> {
+	name: &'a str,
+	version: &'a str,
+	description: &'a str,
+	minecraft_version: &'a str,
+	loader: LoaderJson<'a>,
+	counts: PackCounts,
+	mods: Vec<crate::types::TrackedMod>,
+	resource_packs: Vec<crate::types::TrackedMod>,
+	shader_packs: Vec<crate::types::TrackedMod>,
+}
+
+#[derive(serde::Serialize)]
+struct LoaderJson<'a> {
+	name: Option<String>,
+	version: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct PackCounts {
+	mods: usize,
+	resource_packs: usize,
+	shader_packs: usize,
+}
+
+fn build_pack_json<'a>(
+	modpack: &'a ModpackManifest,
+	storage: &crate::storage::Storage,
+) -> PackJson<'a> {
+	let mods = storage
+		.list(crate::types::ProjectType::Mod)
+		.unwrap_or_default();
+	let resource_packs = storage
+		.list(crate::types::ProjectType::ResourcePack)
+		.unwrap_or_default();
+	let shader_packs = storage
+		.list(crate::types::ProjectType::Shader)
+		.unwrap_or_default();
+
+	let counts = PackCounts {
+		mods: mods.len(),
+		resource_packs: resource_packs.len(),
+		shader_packs: shader_packs.len(),
+	};
+
+	PackJson {
+		name: &modpack.name,
+		version: &modpack.version,
+		description: &modpack.description,
+		minecraft_version: &modpack.minecraft_version,
+		loader: LoaderJson {
+			name: modpack.loader.loader.map(|l| l.to_string()),
+			version: &modpack.loader.version,
+		},
+		counts,
+		mods,
+		resource_packs,
+		shader_packs,
+	}
+}
+
+/// JSON payload for `info tree --json`. A flat node/edge representation
+/// of the installed mods plus their recorded dependency edges — chosen
+/// over a recursive nested tree so cycles, shared deps, and scripted
+/// graph operations all stay straightforward.
+#[derive(serde::Serialize)]
+struct TreeJson {
+	nodes: Vec<TreeNode>,
+	edges: Vec<TreeEdge>,
+}
+
+#[derive(serde::Serialize)]
+struct TreeNode {
+	id: String,
+	name: String,
+	version: String,
+	env: &'static str,
+	source: String,
+	project_type: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct TreeEdge {
+	from: String,
+	to: String,
+	kind: &'static str,
+}
+
+fn build_tree_json(storage: &crate::storage::Storage) -> Result<TreeJson> {
+	let mods = storage
+		.list(crate::types::ProjectType::Mod)
+		.unwrap_or_default();
+
+	let mut nodes = Vec::with_capacity(mods.len());
+	let mut edges = Vec::new();
+	for m in &mods {
+		nodes.push(TreeNode {
+			id: m.id.clone(),
+			name: m.name.clone(),
+			version: m.version.clone(),
+			env: m.env.as_str(),
+			source: m.source.as_str().to_string(),
+			project_type: m.project_type.as_str(),
+		});
+		for dep in &m.dependencies {
+			edges.push(TreeEdge {
+				from: m.id.clone(),
+				to: dep.mod_id.clone(),
+				kind: dependency_kind_str(&dep.kind),
+			});
+		}
+	}
+
+	Ok(TreeJson { nodes, edges })
+}
+
+fn dependency_kind_str(kind: &crate::types::DependencyKind) -> &'static str {
+	use crate::types::DependencyKind;
+	match kind {
+		DependencyKind::Required => "required",
+		DependencyKind::Optional => "optional",
+		DependencyKind::Incompatible => "incompatible",
+		DependencyKind::Embedded => "embedded",
 	}
 }
 
@@ -318,12 +480,18 @@ fn display_items(
 				.apply_to(format!("[{}]", output::source_label(&m.source)));
 			let name_str = console::Style::new().bold().apply_to(&m.name);
 			if m.categories.is_empty() {
-				println!("  ✓ {} {} {} {}", name_str, ver, env, src);
+				output::raw_line(format!(
+					"  ✓ {} {} {} {}",
+					name_str, ver, env, src
+				));
 			} else {
 				let cats = console::Style::new()
 					.magenta()
 					.apply_to(format!("[{}]", m.categories.join(", ")));
-				println!("  ✓ {} {} {} {} {}", name_str, ver, env, src, cats);
+				output::raw_line(format!(
+					"  ✓ {} {} {} {} {}",
+					name_str, ver, env, src, cats
+				));
 			}
 		} else {
 			output::bullet(format!("{} v{}", m.name, m.version));

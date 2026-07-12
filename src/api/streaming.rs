@@ -312,7 +312,9 @@ mod tests {
 			&client,
 			"http://example.invalid/should-not-fetch",
 			&dest,
-			HashPolicy::AcceptedUnhashed { reason: "test fixture has no hash" },
+			HashPolicy::AcceptedUnhashed {
+				reason: "test fixture has no hash",
+			},
 			"test-lib",
 		)
 		.await
@@ -434,7 +436,9 @@ mod tests {
 			&client,
 			&format!("{}/nope.jar", server.url()),
 			&dest,
-			HashPolicy::AcceptedUnhashed { reason: "404 test fixture" },
+			HashPolicy::AcceptedUnhashed {
+				reason: "404 test fixture",
+			},
 			"nope",
 		)
 		.await;

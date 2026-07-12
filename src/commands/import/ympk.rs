@@ -1,8 +1,8 @@
 use super::ImportCommand;
+use super::helpers::{ExtractDecision, classify_archive_entry};
 use crate::app::AppContext;
 use crate::output;
 use anyhow::{Context, Result};
-use path_clean::PathClean;
 use ron::de::from_bytes;
 
 use crate::types::{ProjectType, TrackedMod};
@@ -16,7 +16,7 @@ impl ImportCommand {
 	) -> Result<()> {
 		let output_dir = if let Some(ref dir) = self.output {
 			dir.clone()
-		} else if let Some(ref app) = ctx.modpack {
+		} else if let Some(app) = ctx.modpack() {
 			app.root_dir.clone()
 		} else {
 			let name =
@@ -28,7 +28,8 @@ impl ImportCommand {
 		output::bullet("Format: YMPK (native yammm modpack)");
 		output::bullet(format!("Extracting to: {}", output_dir.display()));
 
-		if output_dir.exists() && !self.yes {
+		// JSON mode is non-interactive — treat as if --yes were passed.
+		if output_dir.exists() && !self.yes && !output::is_json_mode() {
 			let proceed = dialoguer::Confirm::new()
 				.with_prompt(
 					"Destination directory already exists. Import anyway?",
@@ -152,6 +153,17 @@ impl ImportCommand {
 
 		write_config_data(&config_data)?;
 
+		if output::is_json_mode() {
+			output::emit_json(&serde_json::json!({
+				"command": "import",
+				"format": "ympk",
+				"output_dir": output_dir.display().to_string(),
+				"added": added,
+				"skipped": skipped,
+			}))?;
+			return Ok(());
+		}
+
 		output::success(format!(
 			"Done! Added {} mods, {} skipped. Modpack ready at: {}",
 			added,
@@ -168,38 +180,24 @@ fn extract_config_data(
 	root_dir: &Path,
 ) -> Result<Vec<(PathBuf, Vec<u8>)>> {
 	let mut files = Vec::new();
+	let config_root = root_dir.join("config");
 
 	for i in 0..archive.len() {
 		let mut zip_file = archive.by_index(i)?;
 		let name = zip_file.name().to_string();
-		let name_normalized = name.replace('\\', "/");
 
-		if !name_normalized.starts_with("config/") {
-			continue;
-		}
-
-		let relative = &name_normalized["config/".len()..];
-		if relative.is_empty() {
-			continue;
-		}
-
-		let enclosed = zip_file.enclosed_name();
-		let outpath: PathBuf = match enclosed {
-			Some(path) => {
-				let stripped = path.iter().skip(1).collect::<PathBuf>();
-				root_dir.join("config").join(stripped).clean()
-			}
-			None => continue,
-		};
-
-		if !outpath.starts_with(root_dir) {
-			tracing::warn!("Skipping config with path escape: {}", name);
-			continue;
-		}
-
-		if name.ends_with('/') {
-			continue;
-		}
+		let outpath =
+			match classify_archive_entry(&name, "config", &config_root) {
+				ExtractDecision::Extract(p) => p,
+				ExtractDecision::Skip => continue,
+				ExtractDecision::Unsafe => {
+					tracing::warn!(
+						"Skipping config with path escape: {}",
+						name
+					);
+					continue;
+				}
+			};
 
 		if outpath.exists() {
 			continue;
