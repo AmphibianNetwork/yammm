@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fix zip-slip vulnerability in Adoptium JDK extraction — validates all paths stay within the target directory
 - Fix race condition in `write_secret_file` — creates files with `0o600` mode from the start
+- Dependency updates picking up fixed advisories: `plist` 1.10 (quick-xml ≥ 0.41, RUSTSEC-2026-0194/0195) and `anyhow` 1.0.103 (RUSTSEC-2026-0190); the remaining quick-xml 0.38 path via `self_update` is documented and ignored in `.cargo/audit.toml` until `self_update` 1.0 releases
+
+### Fixed
+
+- Forge/NeoForge `unix_args.txt` parsing on Windows: absolute Unix paths (`/...`) were treated as relative and leaked into the server directory as symlink names
+- Diagnostics (warnings, debug tracing) now write to stderr instead of stdout, so `--json` output is always a single parseable document even when a warning fires
 
 ### Changed
 
